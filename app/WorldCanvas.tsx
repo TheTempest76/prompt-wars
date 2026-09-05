@@ -10,31 +10,28 @@ interface WorldCanvasProps {
   terrainCells: string | undefined;
 }
 
-// Dim, desaturated base colour per biome index (0 bloom, 1 cold, 2 vent,
+// Desaturated, near-black base per biome index (0 bloom, 1 cold, 2 vent,
 // 3 barren — matches spacetimedb/src/index.ts's BIOME_* constants). Kept
-// dark on purpose: creatures/food are the only saturated things on screen.
+// dark and muted on purpose: creatures/food are the ONLY fully-saturated
+// things on screen -- if biomes compete for saturation, creatures lose
+// legibility.
 const BIOME_BASE_RGB: [number, number, number][] = [
-  [30, 92, 58], // nutrient bloom -- dim green
-  [38, 66, 108], // cold shelf -- dim blue
-  [118, 58, 32], // thermal vent -- dim orange
-  [50, 46, 42], // barren -- dim neutral
+  [15, 46, 38], // nutrient bloom -- muted green, #0f2e26
+  [13, 34, 50], // cold shelf -- muted blue, #0d2232
+  [58, 36, 18], // thermal vent -- muted amber-brown, #3a2412
+  [10, 16, 22], // barren -- near-black cool, #0a1016
 ];
 const FOOD_COLOR = '#9dffcf';
 const VOID_COLOR = '#05070c'; // outside the dish, when panned past the edge
 
-// Cheap deterministic per-cell hash for a little brightness jitter texture
-// on the terrain — not real noise, just enough grain to avoid flat blobs.
-function hashCell(x: number, y: number): number {
-  let h = (x * 374761393 + y * 668265263) | 0;
-  h = (h ^ (h >>> 13)) * 1274126177;
-  h = h ^ (h >>> 16);
-  return (h >>> 0) / 4294967296; // [0, 1)
-}
-
-// One pixel per world cell. The blurred, soft-field look isn't a blur
-// filter — it's this tiny texture drawn hugely upscaled with the canvas's
-// own bilinear image smoothing, which turns hard per-cell boundaries into
-// smooth gradients for free.
+// One pixel per world cell, flat per-biome colour -- no per-cell jitter.
+// (An earlier version added per-pixel brightness noise here; it read as
+// grainy static layered on the regions instead of soft fields, so it's
+// gone. All of the "soft field" look comes from upscaling below.)
+// The blurred, soft-field look isn't a blur filter — it's this tiny
+// texture drawn hugely upscaled with the canvas's own bilinear image
+// smoothing, which turns hard per-cell boundaries into smooth gradients
+// for free.
 function buildTerrainTexture(cells: string, size: number): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -46,11 +43,10 @@ function buildTerrainTexture(cells: string, size: number): HTMLCanvasElement {
       const idx = y * size + x;
       const biome = Number(cells[idx]);
       const [r, g, b] = BIOME_BASE_RGB[biome] ?? BIOME_BASE_RGB[0];
-      const jitter = 1 + (hashCell(x, y) - 0.5) * 0.35;
       const p = idx * 4;
-      img.data[p] = Math.min(255, r * jitter);
-      img.data[p + 1] = Math.min(255, g * jitter);
-      img.data[p + 2] = Math.min(255, b * jitter);
+      img.data[p] = r;
+      img.data[p + 1] = g;
+      img.data[p + 2] = b;
       img.data[p + 3] = 255;
     }
   }
@@ -69,6 +65,14 @@ interface Camera {
 const TICK_INTERVAL_MS = 2000;
 const MIN_ZOOM_ABS = 2;
 const MAX_ZOOM = 48;
+const FIT_MARGIN = 0.94; // whole-world zoom-out floor sits slightly looser than exact edge-to-edge
+// The world is big on purpose (see spacetimedb/src/index.ts's GRID_SIZE
+// comment) -- the default/starting view is zoomed into a fraction of it,
+// not fit-to-whole-world. More world is revealed by panning outward; "0"
+// (or first load) returns to this same starting view, not a full overview.
+// Zooming all the way out (mouse/pinch/keyboard) still reaches the whole
+// world -- that's MIN_ZOOM, computed separately, not this.
+const INITIAL_VIEW_FRACTION = 0.18;
 const PAN_SPEED = 18; // world cells / second, keyboard
 const ZOOM_SPEED = 1.6; // multiplicative / second, keyboard
 
@@ -80,7 +84,14 @@ interface InterpEntry {
   changedAt: number;
   size: number;
   color: string;
+  isPredator: boolean;
 }
+
+// World-spawned, never player-authored -- deliberately reads as a threat
+// with zero explanation: sharp edges and a fixed red/white marker, not the
+// soft round glow every other entity gets.
+const PREDATOR_FILL = '#ff3f3f';
+const PREDATOR_STROKE = '#ffffff';
 
 function isTypingTarget(el: Element | null): boolean {
   if (!el) return false;
@@ -115,7 +126,14 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
 
   const viewportRef = useRef({ cssWidth: 0, cssHeight: 0 });
   const minZoomRef = useRef(MIN_ZOOM_ABS);
-  const hasFitRef = useRef(false);
+  // Re-fit on every layout change (resize, orientation change, gridSize
+  // arriving/changing) until the user actually touches the camera -- NOT a
+  // one-shot latch. A one-shot fit that runs before the container's CSS
+  // aspect-ratio has settled to its final square box (or before gridSize
+  // has arrived) locks in a wrong zoom forever, since every later resize
+  // only clamped instead of refitting. This was the actual
+  // "grid doesn't fill the canvas" bug.
+  const userAdjustedRef = useRef(false);
   const interpRef = useRef(new Map<string, InterpEntry>());
   const heldKeysRef = useRef(new Set<string>());
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
@@ -140,18 +158,29 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
   const fitCamera = useCallback((size: number) => {
     const { cssWidth, cssHeight } = viewportRef.current;
     if (cssWidth === 0 || cssHeight === 0 || size <= 0) return;
-    const fitZoom = Math.max(MIN_ZOOM_ABS, Math.min(cssWidth / size, cssHeight / size));
-    minZoomRef.current = fitZoom * 0.4;
-    setCamera({ x: size / 2, y: size / 2, zoom: fitZoom });
+
+    // The zoom-out floor: fitting the WHOLE world, with a small margin --
+    // this is what "zoom all the way out" reaches, independent of the
+    // default starting view below.
+    const wholeWorldZoom = Math.max(MIN_ZOOM_ABS, Math.min(cssWidth / size, cssHeight / size) * FIT_MARGIN);
+    minZoomRef.current = wholeWorldZoom;
+
+    // The default/starting view: zoomed into INITIAL_VIEW_FRACTION of the
+    // world, not the whole thing -- more is revealed by panning outward.
+    const visibleSpan = size * INITIAL_VIEW_FRACTION;
+    const startZoom = Math.max(
+      minZoomRef.current,
+      Math.min(MAX_ZOOM, Math.min(cssWidth / visibleSpan, cssHeight / visibleSpan))
+    );
+    setCamera({ x: size / 2, y: size / 2, zoom: startZoom });
   }, []);
 
   const applyLayout = useCallback(() => {
     const size = gridSizeRef.current;
     const { cssWidth, cssHeight } = viewportRef.current;
     if (size <= 0 || cssWidth === 0 || cssHeight === 0) return;
-    if (!hasFitRef.current) {
-      hasFitRef.current = true;
-      fitCamera(size);
+    if (!userAdjustedRef.current) {
+      fitCamera(size); // keep re-fitting -- self-corrects through any transient measurement timing
     } else {
       setCamera(cam => clampCamera(cam, size));
     }
@@ -208,18 +237,19 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
       if (!existing) {
         map.set(key, {
           prevX: c.x, prevY: c.y, currX: c.x, currY: c.y,
-          changedAt: now, size: c.size, color: c.color,
+          changedAt: now, size: c.size, color: c.color, isPredator: c.isPredator,
         });
       } else if (existing.currX !== c.x || existing.currY !== c.y) {
         map.set(key, {
           prevX: existing.currX, prevY: existing.currY, currX: c.x, currY: c.y,
-          changedAt: now, size: c.size, color: c.color,
+          changedAt: now, size: c.size, color: c.color, isPredator: c.isPredator,
         });
       } else {
         // Position unchanged (e.g. only energy/size changed this tick) --
         // refresh cosmetic fields without resetting the lerp in progress.
         existing.size = c.size;
         existing.color = c.color;
+        existing.isPredator = c.isPredator;
       }
     }
     for (const key of [...map.keys()]) {
@@ -289,13 +319,33 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
 
     // Creatures: glowing organisms. A firm dark outline keeps lineage
     // colour reading clearly against every biome, not just the ones it
-    // happens to contrast with by luck.
+    // happens to contrast with by luck. Predators break both rules on
+    // purpose -- sharp diamond, fixed red/white, no soft glow -- so a
+    // first-time viewer reads "that one is dangerous" with no legend.
     for (const entry of interpRef.current.values()) {
       const t = Math.min(1, (now - entry.changedAt) / TICK_INTERVAL_MS);
       const wx = entry.prevX + (entry.currX - entry.prevX) * t + 0.5;
       const wy = entry.prevY + (entry.currY - entry.prevY) * t + 0.5;
       const p = worldToScreen(wx, wy);
       const radius = Math.max(3, entry.size * cam.zoom * 0.5);
+
+      if (entry.isPredator) {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.beginPath();
+        ctx.moveTo(0, -radius);
+        ctx.lineTo(radius, 0);
+        ctx.lineTo(0, radius);
+        ctx.lineTo(-radius, 0);
+        ctx.closePath();
+        ctx.fillStyle = PREDATOR_FILL;
+        ctx.fill();
+        ctx.strokeStyle = PREDATOR_STROKE;
+        ctx.lineWidth = Math.max(1.5, radius * 0.25);
+        ctx.stroke();
+        ctx.restore();
+        continue;
+      }
 
       const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius * 1.8);
       glow.addColorStop(0, entry.color);
@@ -334,6 +384,7 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
         if (keys.has('+') || keys.has('=')) zoomMul *= 1 + ZOOM_SPEED * dt;
         if (keys.has('-') || keys.has('_')) zoomMul /= 1 + ZOOM_SPEED * dt;
         if (dx !== 0 || dy !== 0 || zoomMul !== 1) {
+          userAdjustedRef.current = true;
           const len = Math.hypot(dx, dy) || 1;
           setCamera(cam => clampCamera({
             x: cam.x + (dx / len) * PAN_SPEED * dt,
@@ -358,6 +409,7 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
       const key = e.key.toLowerCase();
       if (key === '0') {
         e.preventDefault();
+        userAdjustedRef.current = false; // explicit reset -- keep auto-fitting again after this
         fitCamera(gridSizeRef.current);
         return;
       }
@@ -408,10 +460,12 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
     const size = gridSizeRef.current;
 
     if (pointersRef.current.size === 1) {
+      userAdjustedRef.current = true;
       const dx = curr.x - prev.x;
       const dy = curr.y - prev.y;
       setCamera(cam => clampCamera({ ...cam, x: cam.x - dx / cam.zoom, y: cam.y - dy / cam.zoom }, size));
     } else if (pointersRef.current.size === 2 && pinchRef.current) {
+      userAdjustedRef.current = true;
       const [p0, p1] = [...pointersRef.current.values()];
       const dist = Math.hypot(p0.x - p1.x, p0.y - p1.y);
       const midX = (p0.x + p1.x) / 2;

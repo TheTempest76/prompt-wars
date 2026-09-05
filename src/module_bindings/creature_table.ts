@@ -22,4 +22,6 @@ export default __t.row({
   fleesLarger: __t.bool().name("flees_larger"),
   aggression: __t.u8(),
   prompt: __t.string(),
+  isPredator: __t.bool().name("is_predator"),
+  kills: __t.u32(),
 });

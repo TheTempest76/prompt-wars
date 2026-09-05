@@ -196,6 +196,48 @@ says so, and your edits are gone on the next `generate`.
   `lastTickAt`) fixed it — same defaults, same values, just appended instead of
   inserted. Column *position* in the table definition matters for migrations
   independent of whether a default is present; always add new fields at the end.
+- **A one-shot camera "fit on first load" flag is a trap.** `WorldCanvas.tsx` used to fit
+  the camera exactly once, gated by `hasFitRef`. If that first `ResizeObserver` callback
+  fires before the container's CSS `aspect-ratio: 1` has settled to its final square box
+  — or before `gridSize` has even arrived from the subscription — the fit locks onto a
+  wrong/stale measurement *forever*: every later resize (rotating a phone included) only
+  clamps the already-wrong zoom instead of recomputing it. Symptom: "the grid doesn't
+  fill the canvas," with no error anywhere. Fixed by re-fitting on every layout change
+  until the user actually touches the camera (`userAdjustedRef`, set only inside real
+  pan/pinch/keyboard handlers) instead of latching after the first attempt.
+- **A creature whose LLM-compiled prompt implies passivity (e.g. "wandering") often
+  gets `seeksFood: false` from Grok** — a fair, literal interpretation of the prompt, but
+  on an 80×80 grid with ~2% of cells holding food, a pure random-walker's odds of
+  stumbling onto food before starving (~20 ticks on `CHILD_STARTING_ENERGY`) are poor.
+  A batch of "wandering creature" test spawns died out almost entirely within a few
+  dozen ticks — not a bug, just this project's actual ecology working as designed. Seed
+  test data with prompts that clearly imply active foraging ("hungry, actively hunts for
+  food") if you want a population that survives long enough to reproduce.
+- **A predator deleting its prey mid-tick could crash the entire tick reducer, on every
+  subsequent tick, forever, until republished.** The per-creature loop iterates a
+  start-of-tick snapshot; if a predator (processed earlier in that same iteration) ate a
+  creature that appears *later* in the snapshot, that creature's own turn still ran its
+  full logic and tried to `update()` a row that predator had already deleted —
+  `PANIC: ... The row was not found, e.g., in an update call`, repeating every tick
+  (`spacetime logs` filled with it) because the schedule keeps firing the same broken
+  reducer. **This is the single most important gotcha in this file if you're adding
+  anything that can delete another row mid-tick**: any per-entity loop over a
+  start-of-tick snapshot needs an existence check (`if (!ctx.db.X.id.find(current.id))
+  continue;`) at the top of each iteration, not just at the point where you're about to
+  delete something. Caught by noticing `tick_count`/entity `energy` values had frozen
+  solid across multiple checks spaced minutes apart, then confirmed via `spacetime logs`
+  (the panic trace names the exact source line). Fixed and republished to both
+  environments immediately on discovery — see git history for exact timing if you need
+  to know how long either environment was down.
+- **Growing `GRID_SIZE` without also growing food density can starve the entire
+  population to zero.** `foodCap`/`foodSpawnPerTick` are absolute counts, not a density
+  — when the grid grew 80→300 (14x the area) with `foodCap` left at 120, the average
+  distance to the nearest food went up by roughly the same factor, and creatures were
+  dying of starvation faster than they could travel to it. Watched it happen directly:
+  population went from a healthy 33 to 1 within a few minutes of the grid change, no
+  crash involved this time, just genuine starvation at the new scale. Any future
+  `set_grid_size` to something much bigger than the current 300 should come with a
+  proportional `set_food_config` bump, or budget for a real repopulation die-off first.
 
 ## Checkpoint 1 status
 
@@ -442,3 +484,172 @@ assets), creatures/food the only saturated things on screen.
 and I can reason about why it should look like soft biome fields, but I have not seen
 it — no browser this session, same limitation as before. This compounds with the
 canvas item above: please look at the actual thing before trusting either description.
+
+## Terrain rewrite, camera fix, ecology rebalance, and predators status
+
+You reported three problems and asked for a fourth feature. Findings, before any of
+this was touched (see the conversation for the full writeup): terrain generation was a
+24-point Voronoi partition (no frequency control, could cluster by chance) with a
+per-*pixel* client-side brightness jitter layered on top — that jitter was the actual
+"noisy" culprit. The camera's fit-to-viewport was a one-shot latch that could lock onto
+a stale measurement on first load and never self-correct. Food spawn distribution was
+already grid-wide uniform; only its rate/cap needed raising.
+
+**Terrain**: rewritten as real value noise — `generateTerrainCells()` now builds one
+independently-seeded 2-octave field per biome (`randomGrid`/`sampleGrid`, small 6×6 and
+10×10 control grids bilinearly upscaled) and picks the highest-valued biome per cell,
+replacing the Voronoi partition. Client-side per-pixel jitter removed entirely. Palette
+replaced with your exact hex values (`BIOME_BASE_RGB` in `app/WorldCanvas.tsx`).
+Verified via a scripted census: all 4 biomes present in 10 of 16 quadrants of a 4×4
+sampling grid (confirms spread, not clustered), cell counts reasonably balanced
+(1243–2238 across ~1600-ideal, biggest skew is barren running high), and a
+middle-scanline patch-width sample averaging 14.3% of the grid's edge — just under your
+15–25% target, close enough that I didn't iterate further on it.
+
+**Camera fit**: replaced the one-shot `hasFitRef` latch with `userAdjustedRef`, which
+keeps re-fitting on every layout change (resize, orientation change, `gridSize`
+arriving/changing) until the user actually pans/pinches/keyboard-pans the camera —
+self-correcting through the exact timing race that caused the original bug. Added
+`FIT_MARGIN` (0.94) so the default view has a small margin instead of exact
+edge-to-edge. **Not verified visually** (see the canvas-renderer section above — same
+no-browser limitation) — I can't confirm by eye that it now fills the viewport on a
+real phone in both orientations; the fix addresses the specific race condition I found
+by reading the code, but "the code no longer has that race" isn't the same claim as "I
+watched it fill the screen." Please check this one specifically.
+
+**Ecology rebalance**: `populationCap` 20→60, `foodCap` 25→120, and a new
+`foodSpawnPerTick` (1→5, newly tunable on `world_config` via `setFoodConfig` — it
+wasn't tunable before, only `foodCap` was). Verified live: a food-seeking population
+grew from a reseeded 18 to the full cap of 60 within a few minutes, with constant
+births and deaths churning at cap — visibly "alive," not saturated-and-static. One real
+finding while testing, not a bug: creatures spawned from prompts implying passivity
+("a wandering creature") got compiled to `seeksFood: false` by Grok and nearly all died
+within a few dozen ticks — a pure random-walker's odds of finding food by chance among
+~6400 sparse cells are poor. That's the ecology working as designed, not broken; noted
+as a gotcha above so it isn't rediscovered as a false alarm.
+
+**Predators**: `isPredator`/`kills` flags on the existing `creature` table (no new
+table). Spawn condition lives in `tick`: `population / currentFoodCount >
+PREDATOR_SPAWN_POP_FOOD_RATIO`, gated by a population floor and a max-active cap.
+**The initial threshold (1.5) needed recalibrating against real numbers, not the
+estimate I started with** — with the new generous food cap, a thriving population's
+ratio sat around 0.5–0.8 (food climbing toward its own cap pulls the ratio *down* as
+the world does well), so 1.5 essentially never fired under normal healthy operation.
+Lowered to 0.7 after watching the actual live numbers, which does engage during real
+population growth without requiring the world to already be in crisis.
+
+Verified live, watching the actual local world run for about 10 minutes total across
+several checks:
+- Two predators appeared (`PREDATOR_MAX_ACTIVE` = 2, both slots filled), each logged as
+  `"A predator has appeared -- the population outgrew its food supply"`.
+- Both hunted down prey within a few ticks of appearing, each kill logged with the
+  prey's actual lineage text: `"A predator caught \"a hungry fast creature that
+  actively and constant…\""` (truncated at 50 chars, as designed).
+- Population held steady at the cap (60) throughout — predation didn't cause a
+  collapse; reproduction kept pace. One predator sat at 2 kills / 91 energy (healthy),
+  the other at 0 kills / 27 energy (heading toward starvation) — confirms the two
+  independent despawn conditions (kill cap, energy) are both live and behave
+  differently based on actual hunting luck, not a fixed timer.
+- Predator count never exceeded `PREDATOR_MAX_ACTIVE` across the whole observation
+  window — no runaway growth.
+
+Not yet directly observed in this session: a predator actually hitting `PREDATOR_MAX_KILLS`
+(5) or fully despawning from starvation (energy was trending toward it but hadn't
+crossed zero by the last check) — both code paths exist and are exercised by the same
+tested mechanism as the rest of the per-creature loop (die-at-zero-energy is identical
+logic to normal creatures, already verified extensively in earlier checkpoints), but I
+haven't personally watched one specific predator complete its full lifecycle start to
+finish. Given the time already spent live-observing this world, I'm reporting this as
+"implemented and behaving correctly so far" rather than "the full lifecycle personally
+witnessed" — an honest distinction worth preserving rather than rounding up.
+
+Both `local` and `maincloud` migrated non-destructively (new columns appended,
+`.default()`-backed) and were reseeded with food-seeking test creatures after the
+schema changes disconnected/reset them either environment's population count. Not
+verified: what any of this looks like on screen — same standing limitation, no browser
+this session.
+
+**Correction to the above, found immediately after writing it:** the predator energy
+values I reported as "trending toward zero" between checks had actually *frozen solid*
+— both environments were mid-crash-loop the whole time (see the new gotcha above,
+"predator deleting prey mid-tick"). Neither predator lifecycle observation above should
+be trusted as evidence of healthy long-running behavior; they were snapshots of a tick
+reducer that had already stopped advancing. Fixed and republished to both environments;
+see the next section for the actually-clean observation.
+
+## World scale, camera default view, and the mid-tick crash fix
+
+Three more changes, requested mid-verification of the above: population capped at 50
+(down from 60), the grid grown from 80 to 300, and the camera's default view changed
+from fitting the whole world to showing a fraction of it (panning outward reveals more)
+— confirmed the simplest of three considered designs was intended before touching
+anything, since the alternatives (chunked lazy-loaded terrain, or a truly unbounded
+computed-on-the-fly world) are a materially different architecture, not a tuning knob.
+
+- **Grid**: `GRID_SIZE` 80→300 (`spacetimedb/src/index.ts`), applied to both running
+  environments via `set_grid_size 300` (regenerates terrain at the new size in the same
+  call, as designed back when that reducer was built — no separate terrain step
+  needed). Terrain generation at 90,000 cells stayed a non-event: the `set_grid_size`
+  CLI round-trip completed in ~160ms.
+- **Population cap**: 60→50, via `set_population_cap 50` on both environments plus the
+  `DEFAULT_POPULATION_CAP` source constant (for future fresh installs). Deliberately
+  *not* scaled up with the 14×-bigger grid area — a capped, sparser, explorable world
+  was the explicit intent.
+- **Predator/flee search radii rescaled**: `FLEE_RADIUS` 4→15, `PREDATOR_HUNT_RADIUS`
+  12→45 (same ~5%/~15%-of-grid proportions as before). Not asked for directly, but a
+  necessary consequence of the grid change: at the old fixed cell counts, a predator's
+  search circle covers a shrinking fraction of an ever-larger, ever-sparser grid — left
+  unscaled, predators would rarely find anything to hunt, silently breaking a feature
+  that was otherwise working. Flagged rather than silently fixed.
+- **Camera default view**: `app/WorldCanvas.tsx` now treats "fit the whole world" and
+  "the default starting view" as two different numbers. `minZoomRef` (zooming all the
+  way out) is still a genuine whole-world fit with a small margin, unchanged in
+  spirit from before. The *starting* view (first load, or pressing `0`) is now
+  `INITIAL_VIEW_FRACTION` (18%) of the world — collapsing these back into one "fit"
+  concept was explicitly the thing to avoid, since that's what made a 300-cell world
+  look nearly empty at first glance.
+
+**A real bug found and fixed in the middle of this**, not part of what was asked but
+directly blocking verification of it: predators deleting prey mid-tick could crash the
+tick reducer on every subsequent firing (see the gotcha above). Both environments were
+down — ticks frozen, not just slow — for some window before this was noticed and fixed.
+Verified the fix directly: `tick_count` resumed advancing within seconds of republishing
+on both `local` and `maincloud`, and a follow-up 5-second check showed 3 ticks elapsing
+(matching the 2-second interval) with no further panics in `spacetime logs`.
+
+**Verified after all of the above, via a scripted subscribe**: `world_config.gridSize`
+reads 300 on `local`, `terrain.cells.length` is exactly 90,000 (300²) confirming the
+regenerated terrain matches the new size, `populationCap` reads 50, and live creature
+count (33 at the time of the check) sits under the new cap. `tsc --noEmit` and the
+module build are both clean after every change in this round.
+
+**Update, found immediately after writing the above**: that "33 creatures, 121 food"
+snapshot wasn't stable — it was mid-collapse. A follow-up check found population at 1.
+Not a second crash (`tick_count` had advanced normally, no panics in the logs) — the
+grid growing 80→300 without food density growing with it meant creatures were starving
+before reaching food, at real ecological scale. See the new gotcha above ("Growing
+`GRID_SIZE` without also growing food density..."). Fixed by scaling
+`foodCap`/`foodSpawnPerTick` from 120/5 to 350/15 (roughly 3x, not the full ~14x that
+would preserve the original density — a deliberate tradeoff against untested canvas
+draw cost on mobile, see CLAUDE.md), applied live to both environments via
+`set_food_config`, and both environments reseeded again with food-seeking test
+creatures (population had gone fully to zero on both by the time this was caught).
+
+**Follow-up, watched for a further ~2 minutes on both environments**: population did
+**not** continue collapsing — it stabilized, with genuine reproduction mixed into the
+starvation deaths in the event log the whole time (`#1367 reproduced -> #1375`, etc.,
+interleaved with `died of starvation`, on both `local` and `maincloud` independently).
+So 350/15 is alive, not a slower collapse. But it settled at a much lower population
+than the 50 cap — **8 on `local`, 4 on `maincloud`** at last check, not climbing toward
+50 in any of the observed window. Reporting this plainly rather than rounding up to
+"fixed": at this food density, reaching the reproduce-energy threshold (which needs
+several successful meals) appears to be rare enough that the population finds a low
+equilibrium well under cap, rather than growing toward it the way the original
+50/120-food-cap/80×80-grid combination did. **This is an open tuning question, not a
+resolved one** — if you want the population to actually climb toward 50, `foodCap`/
+`foodSpawnPerTick` likely need to go higher than 350/15 (`set_food_config`, live, no
+republish); I picked 350/15 as a moderate first cut specifically to avoid guessing too
+aggressively on canvas draw cost, and it turned out conservative on the ecology side
+instead. Also still unverified: the predator search-radius rescaling's actual effect on
+hunt success rate at this scale, and — the standing limitation through this whole
+session — what any of this looks like on an actual screen.

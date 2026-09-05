@@ -22,6 +22,8 @@ export const Creature = __t.object("Creature", {
   fleesLarger: __t.bool(),
   aggression: __t.u8(),
   prompt: __t.string(),
+  isPredator: __t.bool(),
+  kills: __t.u32(),
 });
 export type Creature = __Infer<typeof Creature>;
 
@@ -86,6 +88,7 @@ export const WorldConfig = __t.object("WorldConfig", {
   ventBurnMult: __t.f32(),
   barrenFoodMult: __t.f32(),
   barrenBurnMult: __t.f32(),
+  foodSpawnPerTick: __t.u32(),
 });
 export type WorldConfig = __Infer<typeof WorldConfig>;
 

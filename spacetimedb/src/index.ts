@@ -15,10 +15,25 @@ const LLM_MAX_TOKENS = 500; // must cover reasoning tokens *and* the JSON conten
 const LLM_TIMEOUT_MILLIS = 4000;
 const MAX_PROMPT_LENGTH = 200;
 
-const GRID_SIZE = 80; // seed value for fresh installs — see setGridSize for live worlds
-const DEFAULT_POPULATION_CAP = 20;
-const DEFAULT_FOOD_CAP = 25;
-const FOOD_SPAWN_PER_TICK = 1;
+const GRID_SIZE = 300; // seed value for fresh installs — see setGridSize for live worlds. Big on purpose: the client now starts zoomed into a fraction of it, revealing more as the camera pans, rather than fitting the whole thing on first load.
+// Bumped significantly from the 20/25/1 the world shipped an 80x80 grid
+// with — that combination sat at cap almost immediately and read as
+// saturated/static rather than alive and growing. All three now also live
+// on world_config (foodSpawnPerTick alongside the pre-existing foodCap), so
+// these are just the seed values for fresh installs, not hard limits.
+const DEFAULT_POPULATION_CAP = 50;
+// Scaled up from 120/5 (tuned for the original 80x80 grid) when GRID_SIZE
+// grew to 300 -- same food *count*, 14x the area, means ~14x farther to the
+// nearest food on average, which was starving out the population before it
+// could reproduce (observed directly: population crashed toward zero after
+// the grid grew). Only partially rescaled with area (roughly 3x, not the
+// full 14x food density would take to match the original) as a deliberate
+// tradeoff against canvas draw cost on mobile -- every food row is two
+// draws per frame (bloom + fill), and that hasn't been measured on a real
+// phone. Retune with setFoodConfig if this turns out wrong in either
+// direction.
+const DEFAULT_FOOD_CAP = 350;
+const DEFAULT_FOOD_SPAWN_PER_TICK = 15;
 const INITIAL_CREATURE_COUNT = 5;
 const INITIAL_FOOD_COUNT = 8;
 
@@ -35,9 +50,39 @@ const REPRODUCE_ENERGY_COST = 40;
 const CHILD_STARTING_ENERGY = 40;
 const MUTATION_RANGE = 0.15; // child size = parent size * (1 +/- this), max swing
 
-const FLEE_RADIUS = 4; // cells — how far a fleesLarger creature scans for a threat
+const FLEE_RADIUS = 15; // cells — how far a fleesLarger creature scans for a threat. Scaled with GRID_SIZE (was 4 at grid 80, same ~5% proportion) -- a fixed radius on a much bigger grid would almost never see anything
 const FLEE_SIZE_MARGIN = 1.2; // a creature counts as "larger" above this multiple
 const AGGRESSION_ENERGY_SCALE = 0.05; // per aggression point: burn/gain more, both ways
+
+// Predators: world-spawned, never player-authored -- no owner, no prompt
+// beyond a fixed marker, no lineage. A flag on the existing creature table
+// (not a new one) reuses the entire movement/energy/render pipeline.
+const PREDATOR_HUNT_RADIUS = 45; // cells -- bounded search, same complexity class as flee/food search. Scaled with GRID_SIZE (was 12 at grid 80, same ~15% proportion) -- at the old fixed radius a predator would almost never find prey on a much bigger, sparser grid
+const PREDATOR_SIZE = 1.8; // bigger than the ~1.0-1.3 typical creature -- reads as a threat, also a real size for "smaller than itself" comparisons
+const PREDATOR_STARTING_ENERGY = 60;
+const PREDATOR_ENERGY_BURN_PER_TICK = 3; // hunting costs more than grazing
+const PREDATOR_ENERGY_FROM_KILL = 50;
+const PREDATOR_MAX_KILLS = 5; // hard despawn safety net, independent of energy tuning
+const PREDATOR_COLOR = '#ff3f3f';
+const PREDATOR_GLYPH = '▲'; // ▲ -- unused for client shape (client draws a diamond), kept for parity/debugging
+// Spawn condition: ecological pressure, not a timer. Overcrowded = enough
+// population relative to available food; MIN_POPULATION guards against
+// culling an already-struggling world further; MAX_ACTIVE bounds how many
+// predators can exist at once regardless of how overcrowded things get.
+// Calibrated empirically, not guessed: with populationCap 60 / foodCap 120,
+// a healthy fed-and-growing population sat at population/foodCount ~0.5-0.8
+// (60 pop, 79-100ish food) -- a ratio of 1.5 essentially never fires under
+// normal operation, since food climbing toward its cap drives the ratio
+// *down* as the world thrives. 0.7 actually engages during real fluctuation
+// while population is still climbing toward cap, without needing the world
+// to be in genuine crisis first.
+const PREDATOR_SPAWN_POP_FOOD_RATIO = 0.7;
+const PREDATOR_MIN_POPULATION_TO_SPAWN = 15;
+const PREDATOR_MAX_ACTIVE = 2;
+
+function truncate(text: string, maxLen: number): string {
+  return text.length > maxLen ? text.slice(0, maxLen - 1) + '…' : text;
+}
 
 const U64_MASK = (1n << 64n) - 1n;
 
@@ -83,7 +128,17 @@ const BIOME_COLD = 1; // Cold shelf: food spawn low, energy burn low
 const BIOME_VENT = 2; // Thermal vent: food spawn high, energy burn high
 const BIOME_BARREN = 3; // Barren: food spawn none, energy burn normal
 const BIOME_COUNT = 4;
-const TERRAIN_SEEDS_PER_BIOME = 6; // blobs per biome — spatial coherence, not per-cell noise
+// Two octaves of value noise per biome. Grid point counts are fixed, not
+// scaled by gridSize, so patch size stays a roughly constant *fraction* of
+// the grid regardless of size: with a size-cell grid interpolated from a
+// (N x N) control grid, one control interval spans size/(N-1) world cells.
+// N=6 -> ~20% of the grid per patch (the dominant, "readable region" scale);
+// N=10 -> ~11% (secondary texture, blended at lower weight so it adds
+// natural irregularity without breaking up the large-scale pattern).
+const TERRAIN_COARSE_CELLS = 6;
+const TERRAIN_FINE_CELLS = 10;
+const TERRAIN_COARSE_WEIGHT = 0.65;
+const TERRAIN_FINE_WEIGHT = 0.35;
 
 // Reads a biome index out of a packed terrain string; -1 (unknown) is a
 // safe "no effect" value for callers, covering both "no terrain row yet"
@@ -115,32 +170,67 @@ function multiplierForBiome(
   }
 }
 
-// Scatters a handful of random seed points per biome and assigns every cell
-// to its nearest seed (a cheap Voronoi partition) — produces a few
-// contiguous blobs per biome (spatially coherent "fields") rather than
-// per-cell static. Deliberately not a real noise function (no library, no
-// extra complexity) — the client softens the hard blob edges visually by
-// upscaling a low-res texture with the canvas's own bilinear filtering.
-// O(size^2 * totalSeeds) — a one-time generation cost, never run per tick.
+// A small (w x h) grid of independent random values in [0, 1) — the
+// low-resolution "control points" a value-noise field interpolates between.
+function randomGrid(rng: ReturnType<typeof makeRng>, w: number, h: number): number[] {
+  const g = new Array<number>(w * h);
+  for (let i = 0; i < w * h; i++) g[i] = rng.next();
+  return g;
+}
+
+// Bilinear sample of a small control grid at continuous world coordinate
+// (wx, wy) in [0, size). This — not per-cell randomness — is what makes the
+// field low-frequency: a tiny grid stretched smoothly over the whole world
+// varies slowly, so regions stay large and boundaries stay soft.
+function sampleGrid(grid: number[], gw: number, gh: number, size: number, wx: number, wy: number): number {
+  const gx = (wx / size) * (gw - 1);
+  const gy = (wy / size) * (gh - 1);
+  const x0 = Math.floor(gx);
+  const y0 = Math.floor(gy);
+  const x1 = Math.min(gw - 1, x0 + 1);
+  const y1 = Math.min(gh - 1, y0 + 1);
+  const tx = gx - x0;
+  const ty = gy - y0;
+  const v00 = grid[y0 * gw + x0];
+  const v10 = grid[y0 * gw + x1];
+  const v01 = grid[y1 * gw + x0];
+  const v11 = grid[y1 * gw + x1];
+  const top = v00 + (v10 - v00) * tx;
+  const bottom = v01 + (v11 - v01) * tx;
+  return top + (bottom - top) * ty;
+}
+
+// Generates one independently-seeded 2-octave noise field per biome, then
+// picks the highest-valued biome at each cell (a smooth generalization of
+// "nearest seed" — smooth fields naturally produce several separated local
+// maxima each, spreading every biome across multiple regions instead of
+// risking a handful of random points clustering by chance). No per-cell
+// randomness anywhere in this — that's what keeps regions large and the
+// boundaries between them soft curves rather than static.
+// O(size^2 * BIOME_COUNT) bilinear samples — a one-time generation cost,
+// never run per tick.
 function generateTerrainCells(rng: ReturnType<typeof makeRng>, size: number): string {
-  const seeds: { x: number; y: number; biome: number }[] = [];
+  const fields = [];
   for (let biome = 0; biome < BIOME_COUNT; biome++) {
-    for (let i = 0; i < TERRAIN_SEEDS_PER_BIOME; i++) {
-      seeds.push({ x: rng.int(size), y: rng.int(size), biome });
-    }
+    fields.push({
+      coarse: randomGrid(rng, TERRAIN_COARSE_CELLS, TERRAIN_COARSE_CELLS),
+      fine: randomGrid(rng, TERRAIN_FINE_CELLS, TERRAIN_FINE_CELLS),
+    });
   }
+
   const chars = new Array<string>(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       let bestBiome = BIOME_BLOOM;
-      let bestDist = Infinity;
-      for (const s of seeds) {
-        const dx = s.x - x;
-        const dy = s.y - y;
-        const d = dx * dx + dy * dy;
-        if (d < bestDist) {
-          bestDist = d;
-          bestBiome = s.biome;
+      let bestValue = -Infinity;
+      for (let biome = 0; biome < BIOME_COUNT; biome++) {
+        const f = fields[biome];
+        const value =
+          sampleGrid(f.coarse, TERRAIN_COARSE_CELLS, TERRAIN_COARSE_CELLS, size, x, y) * TERRAIN_COARSE_WEIGHT +
+          sampleGrid(f.fine, TERRAIN_FINE_CELLS, TERRAIN_FINE_CELLS, size, x, y) * TERRAIN_FINE_WEIGHT;
+        if (value > bestValue) {
+          bestValue = value;
+          bestBiome = biome;
         }
       }
       chars[y * size + x] = String(bestBiome);
@@ -251,6 +341,10 @@ const world_config = table(
     ventBurnMult: t.f32().default(1.5),
     barrenFoodMult: t.f32().default(0.0),
     barrenBurnMult: t.f32().default(1.0),
+    // Appended (not grouped next to foodCap above) for the same reason —
+    // new columns must be appended, never inserted mid-table. Retunable
+    // live via setFoodConfig.
+    foodSpawnPerTick: t.u32().default(DEFAULT_FOOD_SPAWN_PER_TICK),
   }
 );
 
@@ -293,6 +387,12 @@ const creature = table(
     fleesLarger: t.bool().default(DEFAULT_CREATURE_PARAMS.fleesLarger),
     aggression: t.u8().default(DEFAULT_CREATURE_PARAMS.aggression),
     prompt: t.string().default('(pre-existing)'), // for explainability
+    // Appended, same reason as everywhere else in this table -- new columns
+    // go at the end. A world-spawned predator: isPredator true means every
+    // other player-authored field (seeksFood/fleesLarger/aggression/prompt)
+    // is ignored in favor of hunt/burn/despawn logic in `tick`.
+    isPredator: t.bool().default(false),
+    kills: t.u32().default(0),
   }
 );
 
@@ -351,6 +451,8 @@ export const init = spacetimedb.init(ctx => {
       size: 1,
       ...DEFAULT_CREATURE_PARAMS,
       prompt: '(seed creature)',
+      isPredator: false,
+      kills: 0,
     });
   }
   for (let i = 0; i < INITIAL_FOOD_COUNT; i++) {
@@ -370,6 +472,7 @@ export const init = spacetimedb.init(ctx => {
     coldFoodMult: 0.4, coldBurnMult: 0.6,
     ventFoodMult: 2.2, ventBurnMult: 1.5,
     barrenFoodMult: 0.0, barrenBurnMult: 1.0,
+    foodSpawnPerTick: DEFAULT_FOOD_SPAWN_PER_TICK,
     rngSeed: rng.seed(),
     tickCount: 0n,
     lastTickAt: ctx.timestamp,
@@ -411,6 +514,16 @@ export const setPopulationCap = spacetimedb.reducer(
     const state = ctx.db.world_config.id.find(0n);
     if (!state) return;
     ctx.db.world_config.id.update({ ...state, populationCap: cap });
+  }
+);
+
+// Tunable live: `spacetime call prompt-wars set_food_config 120 5 --server <env>`.
+export const setFoodConfig = spacetimedb.reducer(
+  { cap: t.u32(), spawnPerTick: t.u32() },
+  (ctx, { cap, spawnPerTick }) => {
+    const state = ctx.db.world_config.id.find(0n);
+    if (!state) return;
+    ctx.db.world_config.id.update({ ...state, foodCap: cap, foodSpawnPerTick: spawnPerTick });
   }
 );
 
@@ -498,6 +611,84 @@ export const tick = spacetimedb.reducer(
     const logs: string[] = [];
 
     for (const current of creatures) {
+      // `creatures` is a stale start-of-tick snapshot -- a predator earlier
+      // in this same iteration may have already deleted this row (caught it
+      // as prey) before its own turn comes up. Without this guard, the
+      // normal-creature branch's update() at the end of this loop body
+      // panics on an already-deleted row ("row was not found"). Same
+      // simultaneity approximation as the flee/hunt searches: greedy,
+      // tick-granular, no attempt at perfect ordering.
+      if (!ctx.db.creature.id.find(current.id)) continue;
+
+      // 0. Predators are world-spawned and behave entirely differently:
+      // hunt the nearest smaller non-predator within radius, no food-
+      // seeking, no fleeing, no reproduction. Handled as its own branch so
+      // normal-creature logic below is completely untouched.
+      if (current.isPredator) {
+        let prey: { id: bigint; x: number; y: number } | undefined;
+        let bestPreyDist = Infinity;
+        for (const other of creatures) {
+          if (other.id === current.id || other.isPredator) continue;
+          if (other.size >= current.size) continue;
+          const d = manhattan(current.x, current.y, other.x, other.y);
+          if (d <= PREDATOR_HUNT_RADIUS && d < bestPreyDist) {
+            bestPreyDist = d;
+            prey = other;
+          }
+        }
+
+        let px = current.x;
+        let py = current.y;
+        if (prey) {
+          const dx = prey.x - px;
+          const dy = prey.y - py;
+          if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) px += Math.sign(dx);
+          else if (dy !== 0) py += Math.sign(dy);
+        } else {
+          const dir = rng.int(4);
+          if (dir === 0) px += 1;
+          else if (dir === 1) px -= 1;
+          else if (dir === 2) py += 1;
+          else py -= 1;
+        }
+        px = clamp(px, 0, state.gridSize - 1);
+        py = clamp(py, 0, state.gridSize - 1);
+
+        const predBiome = biomeAt(terrainCells, state.gridSize, px, py);
+        const predBurnMult = multiplierForBiome(
+          predBiome, state.bloomBurnMult, state.coldBurnMult, state.ventBurnMult, state.barrenBurnMult
+        );
+        let predEnergy = current.energy - PREDATOR_ENERGY_BURN_PER_TICK * predBurnMult;
+        let kills = current.kills;
+
+        // Catch: landed on the prey's tick-start position (same simultaneity
+        // approximation the flee search above already makes -- greedy,
+        // tick-granular, no pathfinding) and the prey row still exists (it
+        // may already have died or been caught by this same tick).
+        if (prey && px === prey.x && py === prey.y) {
+          const stillThere = ctx.db.creature.id.find(prey.id);
+          if (stillThere && !stillThere.isPredator) {
+            ctx.db.creature.id.delete(prey.id);
+            population--;
+            predEnergy = Math.min(MAX_ENERGY, predEnergy + PREDATOR_ENERGY_FROM_KILL);
+            kills++;
+            logs.push(`A predator caught "${truncate(stillThere.prompt, 50)}"`);
+          }
+        }
+
+        if (predEnergy <= 0 || kills >= PREDATOR_MAX_KILLS) {
+          ctx.db.creature.id.delete(current.id);
+          population--;
+          logs.push(
+            kills >= PREDATOR_MAX_KILLS ? 'A predator moved on, sated' : 'A predator starved and vanished'
+          );
+          continue;
+        }
+
+        ctx.db.creature.id.update({ ...current, x: px, y: py, energy: predEnergy, kills });
+        continue;
+      }
+
       // 1. fleesLarger creatures scan for a nearby bigger threat first —
       // fleeing overrides feeding this tick. Otherwise seekers find the
       // nearest food. Both bounded by populationCap/foodCap (hard-capped),
@@ -608,6 +799,8 @@ export const tick = spacetimedb.reducer(
           fleesLarger: current.fleesLarger,
           aggression: current.aggression,
           prompt: current.prompt,
+          isPredator: false,
+          kills: 0,
         });
         population++;
         logs.push(
@@ -626,8 +819,8 @@ export const tick = spacetimedb.reducer(
     let foodCount = foodByCell.size;
     let spawned = 0;
     let attempts = 0;
-    const maxAttempts = FOOD_SPAWN_PER_TICK * 4;
-    while (spawned < FOOD_SPAWN_PER_TICK && foodCount < state.foodCap && attempts < maxAttempts) {
+    const maxAttempts = state.foodSpawnPerTick * 4;
+    while (spawned < state.foodSpawnPerTick && foodCount < state.foodCap && attempts < maxAttempts) {
       attempts++;
       const fx = rng.int(state.gridSize);
       const fy = rng.int(state.gridSize);
@@ -639,6 +832,37 @@ export const tick = spacetimedb.reducer(
         ctx.db.food.insert({ id: 0n, x: fx, y: fy });
         foodCount++;
         spawned++;
+      }
+    }
+
+    // Predator spawning: driven by ecological pressure (population
+    // outstripping food supply), not a timer -- ties predators to the same
+    // overcrowding logic as starvation/reproduction instead of being an
+    // arbitrary bolt-on. Bounded by PREDATOR_MAX_ACTIVE regardless of how
+    // overcrowded things get, and PREDATOR_MIN_POPULATION_TO_SPAWN guards
+    // against culling an already-struggling world further.
+    const overcrowded =
+      population >= PREDATOR_MIN_POPULATION_TO_SPAWN &&
+      population / Math.max(1, foodCount) > PREDATOR_SPAWN_POP_FOOD_RATIO;
+    if (overcrowded) {
+      const activePredators = [...ctx.db.creature.iter()].filter(c => c.isPredator).length;
+      if (activePredators < PREDATOR_MAX_ACTIVE) {
+        ctx.db.creature.insert({
+          id: 0n,
+          x: rng.int(state.gridSize),
+          y: rng.int(state.gridSize),
+          energy: PREDATOR_STARTING_ENERGY,
+          size: PREDATOR_SIZE,
+          glyph: PREDATOR_GLYPH,
+          color: PREDATOR_COLOR,
+          seeksFood: false,
+          fleesLarger: false,
+          aggression: 10,
+          prompt: '(predator)',
+          isPredator: true,
+          kills: 0,
+        });
+        logs.push('A predator has appeared -- the population outgrew its food supply');
       }
     }
 
@@ -757,6 +981,8 @@ export const spawnFromPrompt = spacetimedb.procedure(
         fleesLarger: params.fleesLarger,
         aggression: params.aggression,
         prompt: trimmedPrompt,
+        isPredator: false,
+        kills: 0,
       });
       tx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
       return row;

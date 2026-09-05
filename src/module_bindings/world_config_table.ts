@@ -26,4 +26,5 @@ export default __t.row({
   ventBurnMult: __t.f32().name("vent_burn_mult"),
   barrenFoodMult: __t.f32().name("barren_food_mult"),
   barrenBurnMult: __t.f32().name("barren_burn_mult"),
+  foodSpawnPerTick: __t.u32().name("food_spawn_per_tick"),
 });

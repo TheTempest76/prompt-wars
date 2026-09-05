@@ -38,6 +38,7 @@ import AddReducer from "./add_reducer";
 import RegenerateTerrainReducer from "./regenerate_terrain_reducer";
 import SayHelloReducer from "./say_hello_reducer";
 import SetBiomeMultipliersReducer from "./set_biome_multipliers_reducer";
+import SetFoodConfigReducer from "./set_food_config_reducer";
 import SetGridSizeReducer from "./set_grid_size_reducer";
 import SetLlmKeyReducer from "./set_llm_key_reducer";
 import SetPopulationCapReducer from "./set_population_cap_reducer";
@@ -127,6 +128,7 @@ const reducersSchema = __reducers(
   __reducerSchema("regenerate_terrain", RegenerateTerrainReducer),
   __reducerSchema("say_hello", SayHelloReducer),
   __reducerSchema("set_biome_multipliers", SetBiomeMultipliersReducer),
+  __reducerSchema("set_food_config", SetFoodConfigReducer),
   __reducerSchema("set_grid_size", SetGridSizeReducer),
   __reducerSchema("set_llm_key", SetLlmKeyReducer),
   __reducerSchema("set_population_cap", SetPopulationCapReducer),
