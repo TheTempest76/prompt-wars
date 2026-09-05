@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Creature, Food } from '../src/module_bindings/types';
+import { onFocusCreature } from './focus';
 
 interface WorldCanvasProps {
   gridSize: number;
@@ -121,11 +122,25 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
   // being recreated every time it changes.
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 8 });
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // iOS Safari has no Fullscreen API for non-<video> elements, so
+  // requestFullscreen() is simply absent there. `pseudoFs` is the fallback:
+  // a fixed, viewport-filling overlay toggled purely with CSS.
+  const [pseudoFs, setPseudoFs] = useState(false);
+  const expanded = isFullscreen || pseudoFs;
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(document.fullscreenElement === containerRef.current);
     document.addEventListener('fullscreenchange', onFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
   }, []);
+  // Lock page scroll behind the pseudo-fullscreen overlay.
+  useEffect(() => {
+    if (!pseudoFs) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [pseudoFs]);
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
 
@@ -215,6 +230,40 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
       setCamera(cam => clampCamera(cam, size));
     }
   }, [fitCamera, clampCamera]);
+
+  // "Focus my new creature": SpawnCreature fires an id the moment the spawn
+  // procedure returns; the row itself may still be a beat behind over the
+  // subscription, so we stash the request and let the effect below retry
+  // against each `creatures` update until it lands (or the window lapses).
+  const pendingFocusRef = useRef<{ id: bigint; until: number } | null>(null);
+  useEffect(
+    () =>
+      onFocusCreature(id => {
+        pendingFocusRef.current = { id, until: performance.now() + 8000 };
+      }),
+    []
+  );
+  useEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!pending) return;
+    if (performance.now() > pending.until) {
+      pendingFocusRef.current = null;
+      return;
+    }
+    const target = creatures.find(c => c.id === pending.id);
+    if (!target) return;
+    const size = gridSizeRef.current;
+    const { cssWidth, cssHeight } = viewportRef.current;
+    if (size <= 0 || cssWidth === 0 || cssHeight === 0) return;
+    const FOCUS_SPAN_CELLS = 45; // roughly how much world to frame around it
+    const focusZoom = Math.max(
+      minZoomRef.current,
+      Math.min(MAX_ZOOM, Math.min(cssWidth, cssHeight) / FOCUS_SPAN_CELLS)
+    );
+    userAdjustedRef.current = true; // don't let the layout pass re-fit over this
+    setCamera(cam => clampCamera({ x: target.x + 0.5, y: target.y + 0.5, zoom: focusZoom }, size));
+    pendingFocusRef.current = null;
+  }, [creatures, clampCamera]);
 
   // ---- Canvas sizing: ResizeObserver + devicePixelRatio, not window resize ----
   useEffect(() => {
@@ -568,8 +617,20 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
   const toggleFullscreen = () => {
     if (document.fullscreenElement) {
       void document.exitFullscreen();
+      return;
+    }
+    if (pseudoFs) {
+      setPseudoFs(false);
+      return;
+    }
+    const el = containerRef.current;
+    const req = el?.requestFullscreen?.bind(el);
+    if (req) {
+      // If the browser has the API but rejects (some in-app webviews),
+      // fall back to the CSS overlay rather than doing nothing.
+      Promise.resolve(req()).catch(() => setPseudoFs(true));
     } else {
-      void containerRef.current?.requestFullscreen();
+      setPseudoFs(true); // iOS Safari — no Fullscreen API at all
     }
   };
 
@@ -578,14 +639,17 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
       ref={containerRef}
       style={{
         width: '100%',
-        aspectRatio: isFullscreen ? undefined : '1',
-        height: isFullscreen ? '100%' : undefined,
-        maxHeight: isFullscreen ? undefined : '75vh',
+        aspectRatio: expanded ? undefined : '1',
+        height: expanded ? '100%' : undefined,
+        maxHeight: expanded ? undefined : '75vh',
         background: VOID_COLOR,
-        borderRadius: isFullscreen ? 0 : 8,
+        borderRadius: expanded ? 0 : 8,
         overflow: 'hidden',
         touchAction: 'none',
-        position: 'relative',
+        // pseudo-fullscreen: fill the viewport ourselves (iOS Safari path)
+        position: pseudoFs ? 'fixed' : 'relative',
+        inset: pseudoFs ? 0 : undefined,
+        zIndex: pseudoFs ? 2000 : undefined,
       }}
     >
       <canvas
@@ -606,24 +670,28 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
         onPointerLeave={endPointer}
       />
       <button
+        type="button"
         onClick={toggleFullscreen}
-        aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        aria-label={expanded ? 'Exit fullscreen' : 'Enter fullscreen'}
         style={{
           position: 'absolute',
           top: 8,
           right: 8,
-          width: 36,
-          height: 36,
+          width: 44,
+          height: 44,
           borderRadius: 6,
           border: 'none',
           background: 'rgba(5, 7, 12, 0.6)',
           color: '#9dffcf',
-          fontSize: 18,
+          fontSize: 20,
           lineHeight: 1,
           cursor: 'pointer',
+          zIndex: 1,
+          touchAction: 'manipulation',
+          WebkitTapHighlightColor: 'transparent',
         }}
       >
-        {isFullscreen ? '⤡' : '⤢'}
+        {expanded ? '⤡' : '⤢'}
       </button>
     </div>
   );

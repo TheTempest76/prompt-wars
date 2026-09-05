@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useProcedure, useSpacetimeDB } from 'spacetimedb/react';
 import { procedures } from '../src/module_bindings';
+import { requestFocusCreature } from './focus';
 
 export function SpawnCreature() {
   const { isActive: connected } = useSpacetimeDB();
@@ -26,6 +27,9 @@ export function SpawnCreature() {
       const result = await spawnFromPrompt({ prompt: prompt.trim() });
       setSummary(result.summary);
       setPrompt('');
+      // Jump the canvas camera to the new creature so it doesn't have to be
+      // hunted for in a world much bigger than the viewport.
+      if (result.creatureId != null) requestFocusCreature(result.creatureId);
     } catch (err) {
       setSummary(`Spawn failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {

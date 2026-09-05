@@ -41,10 +41,15 @@ const ENERGY_BURN_PER_TICK = 2;
 const ENERGY_FROM_FOOD = 30;
 const MAX_ENERGY = 100;
 const STARVING_ENERGY_THRESHOLD = 20;
-const SIZE_GROWTH_PER_MEAL = 0.15; // bumped 3x from 0.05 -- growth needs to be visible on-canvas within a short session, not just present in the data
-const SIZE_SHRINK_PER_TICK = 0.02;
-const MIN_SIZE = 0.3;
-const MAX_SIZE = 3;
+// The whole size system is scaled 4x from its original values (starting size
+// was 1) purely to make creatures read bigger on-canvas -- every constant
+// below and PREDATOR_SIZE moved together, so all the size *ratios*
+// (flee margin, predator-vs-prey, growth headroom) are unchanged.
+const STARTING_SIZE = 4;
+const SIZE_GROWTH_PER_MEAL = 0.6; // 4x of 0.15
+const SIZE_SHRINK_PER_TICK = 0.08; // 4x of 0.02
+const MIN_SIZE = 1.2; // 4x of 0.3
+const MAX_SIZE = 12; // 4x of 3
 const REPRODUCE_ENERGY_THRESHOLD = 80;
 const REPRODUCE_ENERGY_COST = 40;
 const CHILD_STARTING_ENERGY = 40;
@@ -63,7 +68,7 @@ const RESTOCK_STARTING_ENERGY = 75;
 // and the allowance refills PLAYER_FOOD_WINDOW_MICROS after the first drop of
 // a batch (a rolling window per identity, tracked in food_grant).
 const PLAYER_FOOD_PER_WINDOW = 10;
-const PLAYER_FOOD_WINDOW_MICROS = 10n * 60n * 1_000_000n; // 10 minutes
+const PLAYER_FOOD_WINDOW_MICROS = 150n * 1_000_000n; // 2.5 minutes
 
 const FLEE_RADIUS = 15; // cells — how far a fleesLarger creature scans for a threat. Scaled with GRID_SIZE (was 4 at grid 80, same ~5% proportion) -- a fixed radius on a much bigger grid would almost never see anything
 const FLEE_SIZE_MARGIN = 1.2; // a creature counts as "larger" above this multiple
@@ -73,7 +78,7 @@ const AGGRESSION_ENERGY_SCALE = 0.05; // per aggression point: burn/gain more, b
 // beyond a fixed marker, no lineage. A flag on the existing creature table
 // (not a new one) reuses the entire movement/energy/render pipeline.
 const PREDATOR_HUNT_RADIUS = 45; // cells -- bounded search, same complexity class as flee/food search. Scaled with GRID_SIZE (was 12 at grid 80, same ~15% proportion) -- at the old fixed radius a predator would almost never find prey on a much bigger, sparser grid
-const PREDATOR_SIZE = 1.8; // bigger than the ~1.0-1.3 typical creature -- reads as a threat, also a real size for "smaller than itself" comparisons
+const PREDATOR_SIZE = 7.2; // 4x of 1.8 -- still bigger than the ~4-5 typical creature, reads as a threat and works for "smaller than itself" comparisons
 const PREDATOR_STARTING_ENERGY = 60;
 const PREDATOR_ENERGY_BURN_PER_TICK = 3; // hunting costs more than grazing
 const PREDATOR_ENERGY_FROM_KILL = 50;
@@ -599,7 +604,7 @@ export const init = spacetimedb.init(ctx => {
       x: rng.int(GRID_SIZE),
       y: rng.int(GRID_SIZE),
       energy: 50,
-      size: 1,
+      size: STARTING_SIZE,
       ...DEFAULT_CREATURE_PARAMS,
       prompt: '(seed creature)',
       isPredator: false,
@@ -1184,7 +1189,7 @@ export const tick = spacetimedb.reducer(
           x: rng.int(state.gridSize),
           y: rng.int(state.gridSize),
           energy: RESTOCK_STARTING_ENERGY,
-          size: parent ? clamp(parent.size * mutation, MIN_SIZE, MAX_SIZE) : 1,
+          size: parent ? clamp(parent.size * mutation, MIN_SIZE, MAX_SIZE) : STARTING_SIZE,
           glyph: parent ? parent.glyph : DEFAULT_CREATURE_PARAMS.glyph,
           color: parent ? parent.color : DEFAULT_CREATURE_PARAMS.color,
           seeksFood: parent ? parent.seeksFood : DEFAULT_CREATURE_PARAMS.seeksFood,
@@ -1315,7 +1320,7 @@ export const spawnFromPrompt = spacetimedb.procedure(
         x: pos.x,
         y: pos.y,
         energy: CHILD_STARTING_ENERGY,
-        size: 1,
+        size: STARTING_SIZE,
         glyph: params.glyph,
         color: params.color,
         seeksFood: params.seeksFood,

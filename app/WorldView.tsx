@@ -9,7 +9,7 @@ import { isSfxMuted, playFoodPickup, setSfxMuted, unlockSfx } from './sfx';
 // Mirrors PLAYER_FOOD_PER_WINDOW / PLAYER_FOOD_WINDOW_MICROS in
 // spacetimedb/src/index.ts -- kept in sync by hand, they change rarely.
 const PLAYER_FOOD_MAX = 10;
-const PLAYER_FOOD_WINDOW_MS = 10 * 60 * 1000;
+const PLAYER_FOOD_WINDOW_MS = 150 * 1000; // 2.5 minutes
 
 function formatTime(micros: bigint): string {
   return new Date(Number(micros / 1000n)).toLocaleTimeString();
