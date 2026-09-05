@@ -12,6 +12,10 @@ interface WorldCanvasProps {
   // Keyed by Identity.toHexString() -- the owning identity's latest
   // person.name, reduced to initials. See app/WorldView.tsx.
   ownerInitials: ReadonlyMap<string, string>;
+  // When true, a tap on the canvas drops food at that cell (via onPlaceFood)
+  // instead of doing nothing; a drag still pans. See app/WorldView.tsx.
+  placeMode?: boolean;
+  onPlaceFood?: (x: number, y: number) => void;
 }
 
 // Desaturated, near-black base per biome index (0 bloom, 1 cold, 2 vent,
@@ -108,7 +112,7 @@ function isTypingTarget(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true;
 }
 
-export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickIntervalMs, ownerInitials }: WorldCanvasProps) {
+export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickIntervalMs, ownerInitials, placeMode = false, onPlaceFood }: WorldCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -133,6 +137,13 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
   tickIntervalMsRef.current = tickIntervalMs;
   const ownerInitialsRef = useRef(ownerInitials);
   ownerInitialsRef.current = ownerInitials;
+  const placeModeRef = useRef(placeMode);
+  placeModeRef.current = placeMode;
+  const onPlaceFoodRef = useRef(onPlaceFood);
+  onPlaceFoodRef.current = onPlaceFood;
+  // Tracks a single-pointer gesture so endPointer can tell a tap (place food)
+  // from a drag (pan). Null whenever there isn't exactly one active pointer.
+  const tapRef = useRef<{ sx: number; sy: number; moved: boolean } | null>(null);
   const terrainCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Terrain never changes after generation, so this texture is built once
@@ -479,8 +490,12 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     const rect = e.currentTarget.getBoundingClientRect();
-    pointersRef.current.set(e.pointerId, { x: e.clientX - rect.left, y: e.clientY - rect.top });
-    if (pointersRef.current.size === 2) {
+    const pt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    pointersRef.current.set(e.pointerId, pt);
+    if (pointersRef.current.size === 1) {
+      tapRef.current = { sx: pt.x, sy: pt.y, moved: false };
+    } else if (pointersRef.current.size === 2) {
+      tapRef.current = null; // a second finger -> this is a pinch, not a tap
       const [p0, p1] = [...pointersRef.current.values()];
       pinchRef.current = {
         dist: Math.hypot(p0.x - p1.x, p0.y - p1.y),
@@ -500,6 +515,10 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
     const size = gridSizeRef.current;
 
     if (pointersRef.current.size === 1) {
+      const tap = tapRef.current;
+      if (tap && !tap.moved && Math.hypot(curr.x - tap.sx, curr.y - tap.sy) > 6) {
+        tap.moved = true; // travelled too far to count as a tap
+      }
       userAdjustedRef.current = true;
       const dx = curr.x - prev.x;
       const dy = curr.y - prev.y;
@@ -530,6 +549,20 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
   const endPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
     pointersRef.current.delete(e.pointerId);
     if (pointersRef.current.size < 2) pinchRef.current = null;
+
+    // A tap that didn't turn into a drag, while in place mode, drops food on
+    // the cell under the pointer.
+    const tap = tapRef.current;
+    if (tap && !tap.moved && pointersRef.current.size === 0 && placeModeRef.current && onPlaceFoodRef.current) {
+      const w = screenToWorld(tap.sx, tap.sy, cameraRef.current);
+      const size = gridSizeRef.current;
+      const cx = Math.floor(w.x);
+      const cy = Math.floor(w.y);
+      if (cx >= 0 && cy >= 0 && cx < size && cy < size) {
+        onPlaceFoodRef.current(cx, cy);
+      }
+    }
+    if (pointersRef.current.size === 0) tapRef.current = null;
   };
 
   const toggleFullscreen = () => {
@@ -558,7 +591,14 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
       <canvas
         ref={canvasRef}
         tabIndex={0}
-        style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none', outline: 'none' }}
+        style={{
+          display: 'block',
+          width: '100%',
+          height: '100%',
+          touchAction: 'none',
+          outline: 'none',
+          cursor: placeMode ? 'crosshair' : 'default',
+        }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endPointer}

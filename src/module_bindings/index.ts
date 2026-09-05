@@ -35,6 +35,7 @@ import {
 
 // Import all reducer arg schemas
 import AddReducer from "./add_reducer";
+import PlaceFoodReducer from "./place_food_reducer";
 import RegenerateTerrainReducer from "./regenerate_terrain_reducer";
 import SayHelloReducer from "./say_hello_reducer";
 import SetBiomeMultipliersReducer from "./set_biome_multipliers_reducer";
@@ -53,6 +54,7 @@ import * as SpawnFromPromptProcedure from "./spawn_from_prompt_procedure";
 import CreatureRow from "./creature_table";
 import EventLogRow from "./event_log_table";
 import FoodRow from "./food_table";
+import FoodGrantRow from "./food_grant_table";
 import PersonRow from "./person_table";
 import TerrainRow from "./terrain_table";
 import WorldConfigRow from "./world_config_table";
@@ -94,6 +96,17 @@ const tablesSchema = __schema({
       { name: 'food_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, FoodRow),
+  foodGrant: __table({
+    name: 'food_grant',
+    indexes: [
+      { accessor: 'owner', name: 'food_grant_owner_idx_btree', algorithm: 'btree', columns: [
+        'owner',
+      ] },
+    ],
+    constraints: [
+      { name: 'food_grant_owner_key', constraint: 'unique', columns: ['owner'] },
+    ],
+  }, FoodGrantRow),
   person: __table({
     name: 'person',
     indexes: [
@@ -128,6 +141,7 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("add", AddReducer),
+  __reducerSchema("place_food", PlaceFoodReducer),
   __reducerSchema("regenerate_terrain", RegenerateTerrainReducer),
   __reducerSchema("say_hello", SayHelloReducer),
   __reducerSchema("set_biome_multipliers", SetBiomeMultipliersReducer),
@@ -149,6 +163,8 @@ type __SchemaWithTableAccessorAliases = Omit<typeof tablesSchema.schemaType, "ta
   tables: typeof tablesSchema.schemaType.tables & {
     /** @deprecated Use `eventLog` instead. This alias will be removed in the next major version. */
     readonly "event_log": Omit<typeof tablesSchema.schemaType.tables["eventLog"], "accessorName"> & { readonly accessorName: "event_log" };
+    /** @deprecated Use `foodGrant` instead. This alias will be removed in the next major version. */
+    readonly "food_grant": Omit<typeof tablesSchema.schemaType.tables["foodGrant"], "accessorName"> & { readonly accessorName: "food_grant" };
     /** @deprecated Use `worldConfig` instead. This alias will be removed in the next major version. */
     readonly "world_config": Omit<typeof tablesSchema.schemaType.tables["worldConfig"], "accessorName"> & { readonly accessorName: "world_config" };
   };
@@ -170,6 +186,7 @@ const REMOTE_MODULE = {
 
 const tableAccessorAliases = {
   "event_log": "eventLog",
+  "food_grant": "foodGrant",
   "world_config": "worldConfig",
 } as const;
 
@@ -193,6 +210,8 @@ type __DbViewBase = __DbConnectionImpl<typeof REMOTE_MODULE>["db"];
 export type DbView = __DbViewBase & {
   /** @deprecated Use `eventLog` instead. This alias will be removed in the next major version. */
   readonly "event_log": __DbViewBase["eventLog"];
+  /** @deprecated Use `foodGrant` instead. This alias will be removed in the next major version. */
+  readonly "food_grant": __DbViewBase["foodGrant"];
   /** @deprecated Use `worldConfig` instead. This alias will be removed in the next major version. */
   readonly "world_config": __DbViewBase["worldConfig"];
 };
@@ -201,6 +220,8 @@ type __TablesBase = __QueryBuilder<typeof tablesSchema.schemaType>;
 export type Tables = __TablesBase & {
   /** @deprecated Use `eventLog` instead. This alias will be removed in the next major version. */
   readonly "event_log": __TablesBase["eventLog"];
+  /** @deprecated Use `foodGrant` instead. This alias will be removed in the next major version. */
+  readonly "food_grant": __TablesBase["foodGrant"];
   /** @deprecated Use `worldConfig` instead. This alias will be removed in the next major version. */
   readonly "world_config": __TablesBase["worldConfig"];
 };

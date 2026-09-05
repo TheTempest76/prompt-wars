@@ -1,13 +1,23 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { useTable } from 'spacetimedb/react';
-import { tables } from '../src/module_bindings';
+import { useReducer, useSpacetimeDB, useTable } from 'spacetimedb/react';
+import { reducers, tables } from '../src/module_bindings';
 import { WorldCanvas } from './WorldCanvas';
 import { isSfxMuted, playFoodPickup, setSfxMuted, unlockSfx } from './sfx';
 
+// Mirrors PLAYER_FOOD_PER_WINDOW / PLAYER_FOOD_WINDOW_MICROS in
+// spacetimedb/src/index.ts -- kept in sync by hand, they change rarely.
+const PLAYER_FOOD_MAX = 10;
+const PLAYER_FOOD_WINDOW_MS = 10 * 60 * 1000;
+
 function formatTime(micros: bigint): string {
   return new Date(Number(micros / 1000n)).toLocaleTimeString();
+}
+
+function formatCountdown(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 export function WorldView() {
@@ -28,6 +38,53 @@ export function WorldView() {
   // Small guestbook table -- a second subscription alongside PersonList's own
   // is negligible here, unlike creature/food (see ARCHITECTURE.md).
   const [people] = useTable(tables.person);
+  const [grants] = useTable(tables.food_grant);
+
+  const { identity } = useSpacetimeDB();
+  const placeFood = useReducer(reducers.placeFood);
+  const [placeMode, setPlaceMode] = useState(false);
+  const [dropMsg, setDropMsg] = useState<string | null>(null);
+
+  // Drives the live "resets in m:ss" countdown. Starts at 0 (server render) and
+  // is set on mount to avoid a hydration mismatch on the timestamp.
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const myGrant = useMemo(
+    () =>
+      identity
+        ? grants.find(g => g.owner.toHexString() === identity.toHexString())
+        : undefined,
+    [grants, identity]
+  );
+  let foodLeft = PLAYER_FOOD_MAX;
+  let resetInMs = 0;
+  if (myGrant && now > 0) {
+    const startMs = Number(myGrant.windowStart.microsSinceUnixEpoch / 1000n);
+    const elapsed = now - startMs;
+    if (elapsed < PLAYER_FOOD_WINDOW_MS) {
+      foodLeft = Math.max(0, PLAYER_FOOD_MAX - myGrant.used);
+      resetInMs = PLAYER_FOOD_WINDOW_MS - elapsed;
+    }
+  }
+
+  // Leave place mode the moment the allowance runs dry.
+  useEffect(() => {
+    if (foodLeft === 0) setPlaceMode(false);
+  }, [foodLeft]);
+
+  const dropFood = async (x: number, y: number) => {
+    try {
+      await placeFood({ x, y });
+      setDropMsg(null);
+    } catch (err) {
+      setDropMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   // Read once on mount, not during render — isSfxMuted() touches localStorage
   // and would mismatch the server-rendered markup.
@@ -128,6 +185,20 @@ export function WorldView() {
           >
             {muted ? '🔇' : '🔊'}
           </button>
+          <button
+            type="button"
+            className={placeMode ? 'btn btn-primary' : 'btn'}
+            onClick={() => setPlaceMode(p => !p)}
+            disabled={foodLeft === 0 && !placeMode}
+            style={{ padding: '0.25rem 0.6rem', fontSize: '0.78rem' }}
+            title="Drop food onto the map — 10 per 10 minutes"
+          >
+            {placeMode
+              ? `Tap the map · ${foodLeft} left`
+              : foodLeft === 0
+                ? `Food refills in ${formatCountdown(resetInMs)}`
+                : `Place food · ${foodLeft}`}
+          </button>
         </span>
         <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
           {metrics.map(m => (
@@ -156,7 +227,14 @@ export function WorldView() {
           terrainCells={terrainCells}
           tickIntervalMs={tickIntervalMs}
           ownerInitials={ownerInitials}
+          placeMode={placeMode}
+          onPlaceFood={dropFood}
         />
+      )}
+      {(placeMode || dropMsg) && (
+        <p style={{ margin: '0.5rem 0 0', fontSize: '0.82rem', color: dropMsg ? 'var(--bad)' : 'var(--muted)' }}>
+          {dropMsg ?? `Tap anywhere on the map to drop a morsel — ${foodLeft} left, refills ${formatCountdown(resetInMs || PLAYER_FOOD_WINDOW_MS)} after your first drop.`}
+        </p>
       )}
 
       <div style={{ marginTop: '1rem' }}>

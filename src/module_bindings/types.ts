@@ -44,6 +44,13 @@ export const Food = __t.object("Food", {
 });
 export type Food = __Infer<typeof Food>;
 
+export const FoodGrant = __t.object("FoodGrant", {
+  owner: __t.identity(),
+  used: __t.u32(),
+  windowStart: __t.timestamp(),
+});
+export type FoodGrant = __Infer<typeof FoodGrant>;
+
 export const LlmSecret = __t.object("LlmSecret", {
   id: __t.u64(),
   owner: __t.identity(),

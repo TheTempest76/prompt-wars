@@ -59,6 +59,12 @@ const DEFAULT_MIN_POPULATION = 20;
 const DEFAULT_RESTOCK_AMOUNT = 10;
 const RESTOCK_STARTING_ENERGY = 75;
 
+// Player-dropped food: each visitor gets PLAYER_FOOD_PER_WINDOW placements,
+// and the allowance refills PLAYER_FOOD_WINDOW_MICROS after the first drop of
+// a batch (a rolling window per identity, tracked in food_grant).
+const PLAYER_FOOD_PER_WINDOW = 10;
+const PLAYER_FOOD_WINDOW_MICROS = 10n * 60n * 1_000_000n; // 10 minutes
+
 const FLEE_RADIUS = 15; // cells — how far a fleesLarger creature scans for a threat. Scaled with GRID_SIZE (was 4 at grid 80, same ~5% proportion) -- a fixed radius on a much bigger grid would almost never see anything
 const FLEE_SIZE_MARGIN = 1.2; // a creature counts as "larger" above this multiple
 const AGGRESSION_ENERGY_SCALE = 0.05; // per aggression point: burn/gain more, both ways
@@ -558,12 +564,26 @@ const event_log = table(
   }
 );
 
+// One row per visitor identity: how many food drops they've spent in the
+// current window and when that window started. Public so the client can show
+// a live "N left / resets in Xs" without a round-trip. Written only by
+// placeFood.
+const food_grant = table(
+  { public: true },
+  {
+    owner: t.identity().primaryKey(),
+    used: t.u32(),
+    windowStart: t.timestamp(),
+  }
+);
+
 const spacetimedb = schema({
   person,
   world_config,
   tick_schedule,
   creature,
   food,
+  food_grant,
   event_log,
   llm_secret,
   terrain,
@@ -672,6 +692,41 @@ export const setPopulationFloor = spacetimedb.reducer(
     const state = ctx.db.world_config.id.find(0n);
     if (!state) return;
     ctx.db.world_config.id.update({ ...state, minPopulation: minPop, restockAmount: restock });
+  }
+);
+
+// Player-dropped food. The browser calls this with a grid cell; the caller's
+// identity (ctx.sender, never an argument) is rate-limited to
+// PLAYER_FOOD_PER_WINDOW drops per rolling PLAYER_FOOD_WINDOW_MICROS. Drops
+// are always plankton -- players help the ecosystem tick over, they don't get
+// to seed the valuable mineral. Throws (surfaced to the UI) when the
+// allowance is spent.
+export const placeFood = spacetimedb.reducer(
+  { x: t.u32(), y: t.u32() },
+  (ctx, { x, y }) => {
+    const state = ctx.db.world_config.id.find(0n);
+    if (!state) return;
+    if (x >= state.gridSize || y >= state.gridSize) {
+      throw new SenderError('That spot is off the map.');
+    }
+
+    const now = ctx.timestamp;
+    const grant = ctx.db.food_grant.owner.find(ctx.sender);
+    if (!grant) {
+      ctx.db.food_grant.insert({ owner: ctx.sender, used: 1, windowStart: now });
+    } else {
+      const elapsed = now.microsSinceUnixEpoch - grant.windowStart.microsSinceUnixEpoch;
+      if (elapsed >= PLAYER_FOOD_WINDOW_MICROS) {
+        ctx.db.food_grant.owner.update({ owner: ctx.sender, used: 1, windowStart: now });
+      } else if (grant.used >= PLAYER_FOOD_PER_WINDOW) {
+        const secsLeft = Number((PLAYER_FOOD_WINDOW_MICROS - elapsed) / 1_000_000n);
+        throw new SenderError(`Out of food -- ${secsLeft}s until your next batch.`);
+      } else {
+        ctx.db.food_grant.owner.update({ ...grant, used: grant.used + 1 });
+      }
+    }
+
+    ctx.db.food.insert({ id: 0n, x, y, kind: FOOD_KIND_PLANKTON });
   }
 );
 
