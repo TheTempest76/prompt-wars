@@ -146,13 +146,29 @@ says so, and your edits are gone on the next `generate`.
   return value, ignore that specific log line — it's not describing what actually
   happened to your call. If you got no return value printed at all, that's a real
   failure and worth investigating.
-- **Verify `GROK_MODEL` before relying on it.** xAI renames/retires model ids faster
-  than most providers; the constant in `spacetimedb/src/index.ts` is a starting point,
-  not a guarantee — check https://docs.x.ai/docs/models if spawns keep silently falling
-  back to defaults. The fallback swallows the reason (a 404 for an unknown model looks
-  identical to a timeout or a bad key — that's the whole point of the try/catch), so
-  `spacetime logs` won't show you why; temporarily logging `res.status` and `res.text()`
-  in `spawnFromPrompt` is the fastest way to see the actual rejection while debugging.
+- **A `gsk_...` key is Groq, not xAI's "Grok."** Nearly-identical names, completely
+  different services/endpoints/models. We built this against `api.x.ai` first, got a
+  Groq key, and had to swap the base URL to `api.groq.com/openai/v1/...` — check which
+  one you actually have before assuming.
+- **Verify `GROK_MODEL` against https://console.groq.com/docs/models before relying on
+  it** — availability changes often, and an unknown model id is a 404 that the
+  fallback swallows silently (indistinguishable from a bad key or a timeout — that's
+  the whole point of the try/catch). `curl` the same request directly, outside the
+  module, when a spawn's output looks suspiciously like `DEFAULT_CREATURE_PARAMS`
+  rather than something the model actually reasoned about.
+- **Every general-purpose Groq model available on a fresh key is a *reasoning* model**
+  (`gpt-oss-20b`/`120b`, `qwen3.x` at the time of writing) — it spends tokens on an
+  internal `reasoning` field before emitting `content`. A `max_tokens` sized for just
+  the JSON answer (we started at 300) gets exhausted mid-reasoning, `content` comes back
+  empty, and `JSON.parse('')` throws — silently triggering the fallback with no visible
+  error anywhere. Fixed with a bigger `max_tokens` (500) and `reasoning_effort: 'low'`
+  in the request body. If a Groq-backed spawn keeps landing on defaults, check
+  `finish_reason` in the raw response before suspecting anything else.
+- **An LLM will follow a JSON example key literally if it looks like a valid value.**
+  The system prompt originally had `"glyph": "X"` as a placeholder; the model read it as
+  "always answer X" and every creature got the same glyph. Placeholders need to look
+  unmistakably like placeholders — `<pick one character or emoji that fits, e.g. "🦂">`
+  — not something that parses as valid JSON on its own.
 
 ## Checkpoint 1 status
 
@@ -242,9 +258,12 @@ Done: `creature` gained `glyph`, `color`, `seeksFood`, `fleesLarger`, `aggressio
 `ctx.sender.equals`); and `spawnFromPrompt`, a **procedure** returning `{ creatureId:
 u64?, summary: string }` directly to its caller. All in `spacetimedb/src/index.ts`.
 
-**LLM provider is Grok (xAI), not Claude/OpenAI** — a deliberate choice for this
-project, made explicit here since it overrides the "default to Claude" instinct.
-`GROK_API_URL`/`GROK_MODEL` name the OpenAI-compatible chat completions endpoint;
+**LLM provider is Groq (api.groq.com — the fast-inference API), not Claude/OpenAI/xAI**
+— a deliberate choice for this project, made explicit here since it overrides the
+"default to Claude" instinct. Easy to mix up with xAI's unrelated "Grok" model; a
+`gsk_...` key prefix is the tell that it's Groq. `GROK_API_URL`/`GROK_MODEL` name the
+OpenAI-compatible chat completions endpoint (kept the `GROK_` prefix on the constants
+since that's what you'll call it out loud — just know it points at Groq's API).
 `CREATURE_COMPILE_SYSTEM_PROMPT` asks for pure JSON matching `CreatureParams` (exactly
 5 fields, intentionally small); `clampCreatureParams` validates and clamps every field
 independently with its own fallback to `DEFAULT_CREATURE_PARAMS` — a response missing
@@ -252,6 +271,21 @@ independently with its own fallback to `DEFAULT_CREATURE_PARAMS` — a response 
 `aggression`, it doesn't discard the whole response. The call happens once, entirely
 inside `spawnFromPrompt`; the `tick` reducer makes zero network calls, same as always
 (reducers can't).
+
+**Getting a real response out of Groq took two fixes past the first working version**
+(both now baked into the code, documented here so the debugging isn't repeated):
+1. Every general-purpose model on a fresh Groq key (`gpt-oss-20b`/`120b`, `qwen3.x`) is
+   a **reasoning model** — it spends tokens on an internal `reasoning` field before
+   `content`. At the original `max_tokens: 300`, it hit the cap mid-reasoning and
+   `content` came back empty, which `JSON.parse` failed on, which silently triggered the
+   fallback — indistinguishable from an auth failure without looking at the raw response
+   directly. Fixed with `max_tokens: 500` (`LLM_MAX_TOKENS`) and `reasoning_effort:
+   'low'` in the request body to keep the reasoning terse.
+2. The system prompt's example shape had `"glyph": "X"` as a placeholder; the model took
+   it literally and always returned the string `"X"`. Rewritten as `<pick one character
+   or emoji that visually fits it, e.g. "🦂" or "F">` — an obvious placeholder, not a
+   valid JSON value — and it started actually choosing (confirmed: a turtle prompt got
+   `🐢` and `#4CAF50`).
 
 The three compiled fields have a real, if simple, effect on behavior, not just display:
 - `seeksFood: false` → the creature ignores food entirely and only random-walks (still
@@ -280,9 +314,8 @@ now renders each creature's actual `glyph`/`color` instead of a generic `C`.
   created with those defaults.
 - Set an intentionally invalid key via `set_llm_key`, called `spawn_from_prompt` again →
   same graceful fallback to defaults, this time after a *real* rejected HTTP round-trip
-  to `api.x.ai` (not just a missing-secret short-circuit) — confirms the `try/catch`
-  and `res.status !== 200` check both work against a live non-200 response, not just a
-  thrown exception.
+  (a since-fixed wrong model id, 404) — confirms the `try/catch` and `res.status !== 200`
+  check both work against a live non-200 response, not just a thrown exception.
 - Dropped `population_cap` to 1 and spawned again → returned `{creatureId: undefined,
   summary: "The world is full right now..."}` instead of crashing or silently dropping
   the request; restored the cap after.
@@ -291,8 +324,15 @@ now renders each creature's actual `glyph`/`color` instead of a generic `C`.
   not just the raw `spacetime call` CLI path — confirmed the procedure's return value
   and that the new row arrived over the live subscription with the correct fields, i.e.
   the identical code path the browser UI depends on.
+- **With a real Groq key set**, three prompts round-tripped through the actual model and
+  produced genuinely distinct, sensible output (not the fallback defaults — confirmed by
+  each result differing from `DEFAULT_CREATURE_PARAMS`): *"extremely aggressive
+  scorpion"* → `aggression 10, fleesLarger true`; *"gentle giant turtle that never
+  flees"* → `aggression 6, glyph 🐢, color #4CAF50`; *"skittish mouse that flees from
+  everything"* → `aggression 0, fleesLarger true`. This is the strongest evidence the
+  whole path works, not just its failure/fallback branch.
 
 Not yet done: republishing this schema to Maincloud (local only, so far — grid/entity
-counts on Maincloud still reflect the pre-Checkpoint-4 shape until that happens), and a
-literal browser click-through (no browser automation available this session — the
-scripted client-binding check above exercises the same code path).
+counts and the Groq key on Maincloud still reflect the pre-Checkpoint-4 shape until
+that happens), and a literal browser click-through (no browser automation available
+this session — the scripted client-binding check above exercises the same code path).

@@ -24,9 +24,14 @@ aren't re-derived or re-argued every session.
   after the fact — it's seeded from `ctx.timestamp`, not from table state. Store an
   explicit `rngSeed: t.u64()` column on `world_config` and advance it yourself each
   tick, so tick N's outcome is derivable from tick N's row data alone.
-- **LLM provider: Grok (xAI), not Claude/OpenAI.** `GROK_MODEL` in
+- **LLM provider: Groq (api.groq.com), not Claude/OpenAI/xAI.** Easy to confuse with
+  xAI's unrelated "Grok" — a `gsk_...` key prefix means Groq. `GROK_MODEL` in
   `spacetimedb/src/index.ts` names the exact model id — verify it against
-  https://docs.x.ai/docs/models before relying on it, xAI renames/retires ids often.
+  https://console.groq.com/docs/models before relying on it, availability changes often.
+  Every general-purpose model on a fresh key is a **reasoning model**, which burns
+  `max_tokens` on an internal `reasoning` field before `content` — see
+  `LLM_MAX_TOKENS`/`reasoning_effort` and the README gotchas for what that broke the
+  first time.
 - **LLM secret:** a private `llm_secret` table, written by `setLlmKey` — the *first*
   identity ever to call it becomes the permanent owner (checked via `ctx.sender.equals`),
   and only that identity can rotate it later. Never accept the key as a client-supplied
@@ -257,9 +262,10 @@ const Behavior = t.enum('Behavior', {
 
 ### Procedures and outbound HTTP
 
-The real shape, from `spawnFromPrompt` in `spacetimedb/src/index.ts` (Grok's API is
-OpenAI-compatible chat completions — `POST /v1/chat/completions`, `Authorization:
-Bearer <key>`, response at `choices[0].message.content`):
+The real shape, from `spawnFromPrompt` in `spacetimedb/src/index.ts` (Groq's API is
+OpenAI-compatible chat completions — `POST https://api.groq.com/openai/v1/chat/completions`,
+`Authorization: Bearer <key>`, response at `choices[0].message.content`; reasoning
+models also populate `choices[0].message.reasoning`, which we don't read):
 
 ```typescript
 export const spawnFromPrompt = spacetimedb.procedure(

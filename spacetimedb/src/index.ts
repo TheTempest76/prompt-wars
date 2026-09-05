@@ -5,11 +5,13 @@ import { ScheduleAt, TimeDuration } from 'spacetimedb';
 const TICK_INTERVAL_MICROS = 2_000_000n; // 2 seconds
 const EVENT_LOG_MAX_ROWS = 50;
 
-// xAI's Grok API, OpenAI-compatible chat completions shape.
-// Verify GROK_MODEL against https://docs.x.ai/docs/models before relying on
-// it — xAI renames/retires model ids faster than most providers.
-const GROK_API_URL = 'https://api.x.ai/v1/chat/completions';
-const GROK_MODEL = 'grok-4';
+// Groq (api.groq.com — the fast-inference API, NOT xAI's "Grok"; a "gsk_"
+// key prefix means Groq). OpenAI-compatible chat completions shape.
+// Verify GROK_MODEL against https://console.groq.com/docs/models before
+// relying on it — model availability there changes often.
+const GROK_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROK_MODEL = 'openai/gpt-oss-20b'; // reasoning model — see LLM_MAX_TOKENS below
+const LLM_MAX_TOKENS = 500; // must cover reasoning tokens *and* the JSON content
 const LLM_TIMEOUT_MILLIS = 4000;
 const MAX_PROMPT_LENGTH = 200;
 
@@ -138,8 +140,8 @@ Output ONLY a single JSON object, no prose, no markdown fences, matching exactly
   "seeksFood": boolean,       // does it actively hunt for food, or just wander?
   "fleesLarger": boolean,     // does it flee from creatures bigger than itself?
   "aggression": integer 0-10, // 0 = passive, 10 = very aggressive
-  "glyph": "X",               // one character or emoji representing it visually
-  "color": "#rrggbb"          // hex color string
+  "glyph": <pick one character or emoji that visually fits it, e.g. "🦂" or "F">,
+  "color": <pick a hex color string that visually fits it, e.g. "#d94f2b">
 }`;
 
 const person = table(
@@ -521,7 +523,8 @@ export const spawnFromPrompt = spacetimedb.procedure(
           },
           body: JSON.stringify({
             model: GROK_MODEL,
-            max_tokens: 300,
+            max_tokens: LLM_MAX_TOKENS,
+            reasoning_effort: 'low', // this is a reasoning model — keep it terse and fast
             messages: [
               { role: 'system', content: CREATURE_COMPILE_SYSTEM_PROMPT },
               { role: 'user', content: trimmedPrompt },
