@@ -908,18 +908,25 @@ food config. Not fixed in this round; noted rather than glossed over.
 **Seeding commands** (30 random creatures + a predator), for reuse:
 
 ```bash
-# Seed ~30 creatures at varied, habitat-biased locations (repeat the call with
-# different one-line prompts covering fire/vent, ice/cold, plant/bloom, desert/barren,
-# and neutral themes for a natural spread across all four biomes):
-spacetime call prompt-wars spawn_from_prompt '"a fire-breathing salamander that thrives in volcanic heat"' --server local
-spacetime call prompt-wars spawn_from_prompt '"a frost wolf that hunts across arctic ice shelves"' --server local
-spacetime call prompt-wars spawn_from_prompt '"a bioluminescent jellyfish drifting through a lush coral bloom"' --server local
-spacetime call prompt-wars spawn_from_prompt '"a cactus spider stalking prey across barren rock"' --server local
-# ...repeat with 26 more one-line prompts, swap --server local for --server maincloud to seed that environment instead
+# Seed all 30 prompts in scripts/seed_prompts.txt in one go (one spawn_from_prompt
+# call per line, habitat-biased placement, real LLM-matched emoji per creature):
+bash scripts/seed.sh                     # --server local (default)
+bash scripts/seed.sh --server maincloud  # or the live deployment
 
 # Spawn a predator manually (world-only mechanic, capped at PREDATOR_MAX_ACTIVE = 2):
 spacetime call prompt-wars spawn_predator --server local
 ```
+
+`scripts/seed_prompts.txt` is plain text, one creature description per line — edit it
+directly to change the seed set (different themes, more/fewer creatures); `scripts/seed.sh`
+just loops it through `spawn_from_prompt`. Each call is a real Groq round-trip, so the
+full file takes a couple of minutes — expected, not a hang. **Re-run this whenever the
+world looks empty** — see the food-tuning note above: at the current 350/15 config,
+population has been observed not just declining but going fully extinct on both
+`local` and `maincloud` (0 creatures, ticks still advancing normally) after being left
+unattended for a while. Reseeding brings it back, but doesn't fix the underlying
+imbalance — if this keeps happening, `set_food_config` needs a real bump, not another
+reseed.
 
 ## Checkpoint 6: profile names + a full "how do I ship a value change" checklist
 
