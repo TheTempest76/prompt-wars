@@ -30,9 +30,27 @@ aren't re-derived or re-argued every session.
   Events for pan/pinch, keyboard for arrows/WASD/+-/0 — gated off whenever a text input
   is focused), and a single `requestAnimationFrame` loop that also lerps creature
   positions between ticks (`TICK_INTERVAL_MS`) so they don't teleport. `app/WorldView.tsx`
-  stays the one place subscribing to `world_config`/`creature`/`food`/`event_log` and
-  passes rows down as props — don't add a second `useTable` call for the same table
+  stays the one place subscribing to `world_config`/`creature`/`food`/`event_log`/`terrain`
+  and passes rows down as props — don't add a second `useTable` call for the same table
   inside `WorldCanvas`, that'd double the subscription.
+- **Visual theme: microbial culture on a dark field.** Dark near-black void outside the
+  world, low-saturation biome colour fields inside it, and creatures/food are the *only*
+  saturated things on screen — don't add more colour, that's the whole point. Terrain is
+  one `<gridSize>x<gridSize>` offscreen canvas (one pixel per cell) drawn hugely upscaled
+  with the browser's own bilinear smoothing — that upscale *is* the soft-blurred-boundary
+  effect; there's no blur filter and no image asset. No sprites, no texture loader, no
+  asset manifest — see `app/WorldCanvas.tsx`'s biome-color/food-color constants for the
+  only thing to touch to restyle it.
+- **Terrain is a mechanic, not decoration.** Four biomes (`BIOME_BLOOM`/`COLD`/`VENT`/
+  `BARREN`, indices 0-3), each with a food-spawn multiplier and an energy-burn multiplier
+  that `tick` actually reads — both live on `world_config`, retunable via
+  `setBiomeMultipliers` without republishing (see CLI quick reference). Terrain itself is
+  **one singleton row** (`terrain.cells`, a packed string, one character per cell) —
+  never one row per tile, that would put thousands of rows in every client's subscription
+  for data that's static after generation. Regenerated wholesale (never per-cell) by
+  `generateTerrainCells()`, called from `init`, `setGridSize` (grid size changing
+  invalidates old terrain, so it must regenerate too), and standalone via
+  `regenerateTerrain`.
 - **Determinism:** don't rely on bare `ctx.random()` for anything you need to explain
   after the fact — it's seeded from `ctx.timestamp`, not from table state. Store an
   explicit `rngSeed: t.u64()` column on `world_config` and advance it yourself each
@@ -51,6 +69,14 @@ aren't re-derived or re-argued every session.
   argument — procedure arguments come from the browser and are public.
 - **No auth, no accounts.** Anonymous identity only. A stranger must be usable within
   30 seconds of opening the URL. Don't add login, OIDC, or a token exchange flow.
+- **Static branding assets are hand-placed placeholders, not a generation pipeline.**
+  `public/og-image.png` (1200×630), `public/hero.png` (1600×900), `public/wordmark.png`
+  (800×200, transparent) — swap these files directly when real artwork exists, no other
+  code changes needed. `app/layout.tsx`'s `metadata.openGraph`/`.twitter` point at
+  `og-image.png`; set `NEXT_PUBLIC_SITE_URL` to the real deployed origin before sharing a
+  launch post, or the resolved `og:image` URL points at `localhost`. Nothing in-world
+  (creatures, food, terrain) uses image assets — canvas-drawn only, see the visual-theme
+  decision above.
 
 ## Critical Rules
 
@@ -139,6 +165,10 @@ spacetime server ping local
 
 # Escape hatch for a schema conflict during development
 spacetime publish --module-path spacetimedb --server local --delete-data=always --yes prompt-wars
+
+# Retune a biome live (biome index: 0 bloom, 1 cold shelf, 2 thermal vent, 3 barren)
+spacetime call prompt-wars set_biome_multipliers 2 2.5 1.8 --server local   # vent: food x2.5, burn x1.8
+spacetime call prompt-wars regenerate_terrain --server local               # re-roll terrain, same grid size
 ```
 
 **Regenerate bindings any time you add/remove/rename a table, column, reducer,

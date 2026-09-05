@@ -35,7 +35,9 @@ import {
 
 // Import all reducer arg schemas
 import AddReducer from "./add_reducer";
+import RegenerateTerrainReducer from "./regenerate_terrain_reducer";
 import SayHelloReducer from "./say_hello_reducer";
+import SetBiomeMultipliersReducer from "./set_biome_multipliers_reducer";
 import SetGridSizeReducer from "./set_grid_size_reducer";
 import SetLlmKeyReducer from "./set_llm_key_reducer";
 import SetPopulationCapReducer from "./set_population_cap_reducer";
@@ -48,6 +50,7 @@ import CreatureRow from "./creature_table";
 import EventLogRow from "./event_log_table";
 import FoodRow from "./food_table";
 import PersonRow from "./person_table";
+import TerrainRow from "./terrain_table";
 import WorldConfigRow from "./world_config_table";
 
 /** Type-only namespace exports for generated type groups. */
@@ -94,6 +97,17 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, PersonRow),
+  terrain: __table({
+    name: 'terrain',
+    indexes: [
+      { accessor: 'id', name: 'terrain_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'terrain_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, TerrainRow),
   worldConfig: __table({
     name: 'world_config',
     indexes: [
@@ -110,7 +124,9 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("add", AddReducer),
+  __reducerSchema("regenerate_terrain", RegenerateTerrainReducer),
   __reducerSchema("say_hello", SayHelloReducer),
+  __reducerSchema("set_biome_multipliers", SetBiomeMultipliersReducer),
   __reducerSchema("set_grid_size", SetGridSizeReducer),
   __reducerSchema("set_llm_key", SetLlmKeyReducer),
   __reducerSchema("set_population_cap", SetPopulationCapReducer),

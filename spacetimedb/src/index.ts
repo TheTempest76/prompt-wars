@@ -76,6 +76,79 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+// Biome indices — also the literal characters stored in terrain.cells (one
+// char per cell, e.g. cells[y*gridSize+x] === '2' means thermal vent).
+const BIOME_BLOOM = 0; // Nutrient bloom: food spawn high, energy burn normal
+const BIOME_COLD = 1; // Cold shelf: food spawn low, energy burn low
+const BIOME_VENT = 2; // Thermal vent: food spawn high, energy burn high
+const BIOME_BARREN = 3; // Barren: food spawn none, energy burn normal
+const BIOME_COUNT = 4;
+const TERRAIN_SEEDS_PER_BIOME = 6; // blobs per biome — spatial coherence, not per-cell noise
+
+// Reads a biome index out of a packed terrain string; -1 (unknown) is a
+// safe "no effect" value for callers, covering both "no terrain row yet"
+// and an out-of-bounds index (e.g. grid grew before terrain regenerated).
+function biomeAt(cells: string | undefined, gridSize: number, x: number, y: number): number {
+  if (!cells) return -1;
+  const idx = y * gridSize + x;
+  if (idx < 0 || idx >= cells.length) return -1;
+  const digit = cells.charCodeAt(idx) - 48; // '0'.charCodeAt(0)
+  return digit >= 0 && digit < BIOME_COUNT ? digit : -1;
+}
+
+// One shared lookup for both food-spawn and energy-burn multipliers —
+// same shape, different four numbers, and plain-number params avoid needing
+// a typed WorldConfig-row parameter for a two-line function.
+function multiplierForBiome(
+  biome: number,
+  bloom: number,
+  cold: number,
+  vent: number,
+  barren: number
+): number {
+  switch (biome) {
+    case BIOME_BLOOM: return bloom;
+    case BIOME_COLD: return cold;
+    case BIOME_VENT: return vent;
+    case BIOME_BARREN: return barren;
+    default: return 1; // unknown biome -> neutral, never blocks simulation
+  }
+}
+
+// Scatters a handful of random seed points per biome and assigns every cell
+// to its nearest seed (a cheap Voronoi partition) — produces a few
+// contiguous blobs per biome (spatially coherent "fields") rather than
+// per-cell static. Deliberately not a real noise function (no library, no
+// extra complexity) — the client softens the hard blob edges visually by
+// upscaling a low-res texture with the canvas's own bilinear filtering.
+// O(size^2 * totalSeeds) — a one-time generation cost, never run per tick.
+function generateTerrainCells(rng: ReturnType<typeof makeRng>, size: number): string {
+  const seeds: { x: number; y: number; biome: number }[] = [];
+  for (let biome = 0; biome < BIOME_COUNT; biome++) {
+    for (let i = 0; i < TERRAIN_SEEDS_PER_BIOME; i++) {
+      seeds.push({ x: rng.int(size), y: rng.int(size), biome });
+    }
+  }
+  const chars = new Array<string>(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let bestBiome = BIOME_BLOOM;
+      let bestDist = Infinity;
+      for (const s of seeds) {
+        const dx = s.x - x;
+        const dy = s.y - y;
+        const d = dx * dx + dy * dy;
+        if (d < bestDist) {
+          bestDist = d;
+          bestBiome = s.biome;
+        }
+      }
+      chars[y * size + x] = String(bestBiome);
+    }
+  }
+  return chars.join('');
+}
+
 // The fixed shape Grok compiles a one-line prompt into. Small and flat on
 // purpose — every field must be independently validated and clamped before
 // it touches a table, so keeping the set small keeps that review honest.
@@ -165,6 +238,32 @@ const world_config = table(
     rngSeed: t.u64(),
     tickCount: t.u64(),
     lastTickAt: t.timestamp(),
+    // Biome multipliers — retunable live via setBiomeMultipliers, never a
+    // republish. Appended (not inserted earlier in the row) with defaults so
+    // this migrates onto an already-running world via a normal hot-swap
+    // publish instead of a --delete-data wipe: SpacetimeDB requires new
+    // columns to be appended, not reordered into the middle of a table.
+    bloomFoodMult: t.f32().default(2.0),
+    bloomBurnMult: t.f32().default(1.0),
+    coldFoodMult: t.f32().default(0.4),
+    coldBurnMult: t.f32().default(0.6),
+    ventFoodMult: t.f32().default(2.2),
+    ventBurnMult: t.f32().default(1.5),
+    barrenFoodMult: t.f32().default(0.0),
+    barrenBurnMult: t.f32().default(1.0),
+  }
+);
+
+// Terrain never changes after generation (regenerated wholesale only on
+// setGridSize or an explicit regenerateTerrain call) — one singleton row
+// holding a packed string, one character per cell, NOT one row per tile.
+// At 80x80 that's 6.4KB of text in the subscription; one row per cell would
+// be 6400 rows for data that's otherwise completely static.
+const terrain = table(
+  { public: true },
+  {
+    id: t.u64().primaryKey(),
+    cells: t.string(),
   }
 );
 
@@ -236,6 +335,7 @@ const spacetimedb = schema({
   food,
   event_log,
   llm_secret,
+  terrain,
 });
 export default spacetimedb;
 
@@ -257,6 +357,8 @@ export const init = spacetimedb.init(ctx => {
     ctx.db.food.insert({ id: 0n, x: rng.int(GRID_SIZE), y: rng.int(GRID_SIZE) });
   }
 
+  ctx.db.terrain.insert({ id: 0n, cells: generateTerrainCells(rng, GRID_SIZE) });
+
   // Inserted after the seeding draws above, so the stored seed reflects
   // state post-seeding rather than the raw timestamp-derived starting seed.
   ctx.db.world_config.insert({
@@ -264,6 +366,10 @@ export const init = spacetimedb.init(ctx => {
     gridSize: GRID_SIZE,
     populationCap: DEFAULT_POPULATION_CAP,
     foodCap: DEFAULT_FOOD_CAP,
+    bloomFoodMult: 2.0, bloomBurnMult: 1.0,
+    coldFoodMult: 0.4, coldBurnMult: 0.6,
+    ventFoodMult: 2.2, ventBurnMult: 1.5,
+    barrenFoodMult: 0.0, barrenBurnMult: 1.0,
     rngSeed: rng.seed(),
     tickCount: 0n,
     lastTickAt: ctx.timestamp,
@@ -312,14 +418,64 @@ export const setPopulationCap = spacetimedb.reducer(
 // existing creature/food positions stay valid since they're always within
 // [0, oldSize) which is a subset of any larger [0, newSize). Future
 // movement/food-spawns immediately use the new bound (they read
-// world_config.gridSize fresh each tick). CLI: `spacetime call prompt-wars
-// set_grid_size 80 --server <env>`.
+// world_config.gridSize fresh each tick). Terrain is regenerated at the new
+// size in the same call, since old terrain data doesn't cover the new area
+// (and would be the wrong length for index math) either way. CLI:
+// `spacetime call prompt-wars set_grid_size 80 --server <env>`.
 export const setGridSize = spacetimedb.reducer(
   { size: t.u32() },
   (ctx, { size }) => {
     const state = ctx.db.world_config.id.find(0n);
     if (!state) return;
-    ctx.db.world_config.id.update({ ...state, gridSize: size });
+    const rng = makeRng(state.rngSeed);
+    const cells = generateTerrainCells(rng, size);
+    const existingTerrain = ctx.db.terrain.id.find(0n);
+    if (existingTerrain) ctx.db.terrain.id.update({ ...existingTerrain, cells });
+    else ctx.db.terrain.insert({ id: 0n, cells });
+    ctx.db.world_config.id.update({ ...state, gridSize: size, rngSeed: rng.seed() });
+  }
+);
+
+// Re-rolls terrain at the current grid size without changing anything else
+// — used once to seed terrain on a world that predates this feature (no
+// size change, so setGridSize's regeneration never ran), or any time you
+// just want new terrain. CLI: `spacetime call prompt-wars regenerate_terrain
+// --server <env>`.
+export const regenerateTerrain = spacetimedb.reducer(ctx => {
+  const state = ctx.db.world_config.id.find(0n);
+  if (!state) return;
+  const rng = makeRng(state.rngSeed);
+  const cells = generateTerrainCells(rng, state.gridSize);
+  const existing = ctx.db.terrain.id.find(0n);
+  if (existing) ctx.db.terrain.id.update({ ...existing, cells });
+  else ctx.db.terrain.insert({ id: 0n, cells });
+  ctx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
+});
+
+// Retune one biome's pair of multipliers live. `biome` is the same index
+// used in terrain.cells: 0 bloom, 1 cold shelf, 2 thermal vent, 3 barren.
+// CLI: `spacetime call prompt-wars set_biome_multipliers 2 2.5 1.8 --server <env>`.
+export const setBiomeMultipliers = spacetimedb.reducer(
+  { biome: t.u8(), foodMult: t.f32(), burnMult: t.f32() },
+  (ctx, { biome, foodMult, burnMult }) => {
+    const state = ctx.db.world_config.id.find(0n);
+    if (!state) return;
+    switch (biome) {
+      case BIOME_BLOOM:
+        ctx.db.world_config.id.update({ ...state, bloomFoodMult: foodMult, bloomBurnMult: burnMult });
+        break;
+      case BIOME_COLD:
+        ctx.db.world_config.id.update({ ...state, coldFoodMult: foodMult, coldBurnMult: burnMult });
+        break;
+      case BIOME_VENT:
+        ctx.db.world_config.id.update({ ...state, ventFoodMult: foodMult, ventBurnMult: burnMult });
+        break;
+      case BIOME_BARREN:
+        ctx.db.world_config.id.update({ ...state, barrenFoodMult: foodMult, barrenBurnMult: burnMult });
+        break;
+      default:
+        throw new SenderError(`Unknown biome index ${biome} — expected 0-3.`);
+    }
   }
 );
 
@@ -332,6 +488,7 @@ export const tick = spacetimedb.reducer(
 
     const rng = makeRng(state.rngSeed);
     const tickNumber = state.tickCount + 1n;
+    const terrainCells = ctx.db.terrain.id.find(0n)?.cells;
 
     const creatures = [...ctx.db.creature.iter()];
     const foodByCell = new Map<string, { id: bigint; x: number; y: number }>();
@@ -399,9 +556,15 @@ export const tick = spacetimedb.reducer(
 
       // 3. Eat if standing on food; otherwise burn energy, and shrink if
       // starving. Aggression trades burn rate for gain rate either way —
-      // no free lunch for a "voracious" creature.
+      // no free lunch for a "voracious" creature. Burn is also scaled by
+      // the biome the creature just moved into — a cold shelf is cheap to
+      // live on, a thermal vent is expensive.
+      const biomeHere = biomeAt(terrainCells, state.gridSize, x, y);
+      const burnMult = multiplierForBiome(
+        biomeHere, state.bloomBurnMult, state.coldBurnMult, state.ventBurnMult, state.barrenBurnMult
+      );
       const aggressionScale = 1 + current.aggression * AGGRESSION_ENERGY_SCALE;
-      let energy = current.energy - ENERGY_BURN_PER_TICK * aggressionScale;
+      let energy = current.energy - ENERGY_BURN_PER_TICK * aggressionScale * burnMult;
       let size = current.size;
       const cellKey = `${x},${y}`;
       const eaten = foodByCell.get(cellKey);
@@ -455,15 +618,28 @@ export const tick = spacetimedb.reducer(
       ctx.db.creature.id.update({ ...current, x, y, energy, size });
     }
 
-    // Keep food topped up to the cap, a few cells per tick.
+    // Keep food topped up to the cap, biome-weighted: a candidate cell's
+    // biome food multiplier is the probability (clamped to 1) that a spawn
+    // attempt there actually succeeds, so barren (mult 0) never spawns food
+    // and a thermal vent (mult 2.2) usually does. Bounded retry count keeps
+    // this O(1) even when many candidates land on low-multiplier biomes.
     let foodCount = foodByCell.size;
-    for (let i = 0; i < FOOD_SPAWN_PER_TICK && foodCount < state.foodCap; i++) {
-      ctx.db.food.insert({
-        id: 0n,
-        x: rng.int(state.gridSize),
-        y: rng.int(state.gridSize),
-      });
-      foodCount++;
+    let spawned = 0;
+    let attempts = 0;
+    const maxAttempts = FOOD_SPAWN_PER_TICK * 4;
+    while (spawned < FOOD_SPAWN_PER_TICK && foodCount < state.foodCap && attempts < maxAttempts) {
+      attempts++;
+      const fx = rng.int(state.gridSize);
+      const fy = rng.int(state.gridSize);
+      const foodMult = multiplierForBiome(
+        biomeAt(terrainCells, state.gridSize, fx, fy),
+        state.bloomFoodMult, state.coldFoodMult, state.ventFoodMult, state.barrenFoodMult
+      );
+      if (rng.next() < Math.min(1, foodMult * 0.5)) {
+        ctx.db.food.insert({ id: 0n, x: fx, y: fy });
+        foodCount++;
+        spawned++;
+      }
     }
 
     if (logs.length > 0) {

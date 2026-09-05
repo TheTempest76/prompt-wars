@@ -188,6 +188,14 @@ says so, and your edits are gone on the next `generate`.
   the migration plan showed `Created columns ... (default: ...)` instead of destroying
   the table. Only works for newly-appended non-key columns (see CLAUDE.md) — reach for
   this before `--delete-data=always` whenever the data is worth keeping.
+- **New columns must be *appended*, not inserted earlier in the row — even with
+  defaults.** Adding the eight biome multiplier columns to `world_config` between
+  `foodCap` and `rngSeed` (matching the source's logical grouping) failed outright:
+  `Reordering table world_config requires a manual migration`, publish aborted before
+  touching anything. Moving the same columns to the end of the field list (after
+  `lastTickAt`) fixed it — same defaults, same values, just appended instead of
+  inserted. Column *position* in the table definition matters for migrations
+  independent of whether a default is present; always add new fields at the end.
 
 ## Checkpoint 1 status
 
@@ -394,3 +402,43 @@ or the Maincloud URL, not devtools' device emulation, and check: not blurry, one
 pan, pinch zoom, the page itself doesn't scroll while panning, and the spawn input is
 still reachable/typeable with the keyboard up. Report back what breaks; I have no way to
 find that myself right now.
+
+## Biome terrain + visual theme status
+
+Four biomes (nutrient bloom, cold shelf, thermal vent, barren), each with a food-spawn
+and an energy-burn multiplier that `tick` actually reads — not decorative. Terrain is
+one singleton row (`terrain.cells`, a packed string, one char per cell) generated once
+via a cheap Voronoi-style blob scatter, never one row per tile. World grew biomes on
+both environments **without a wipe** (see the new column-ordering gotcha above for the
+one real snag). Visual theme: dark void outside the world, biome color fields inside it
+drawn as one tiny offscreen texture per biome layout and hugely upscaled (the browser's
+own bilinear smoothing gives the soft blurred-boundary look, no blur filter, no image
+assets), creatures/food the only saturated things on screen.
+
+**Verified, all against the local server via CLI/scripted checks:**
+- Cleared all food, waited ~30 ticks, then checked every remaining food row's biome:
+  **barren got zero** (multiplier 0 — `rng.next() < 0` is never true), cold shelf got 2
+  (low multiplier, 0.4), bloom and vent got 11 and 12 respectively (high multipliers,
+  2.0/2.2) — the tick reducer is genuinely reading `world_config`'s biome columns, not
+  just storing them.
+- `terrain.cells.length === gridSize * gridSize` (6400 at the current 80×80) on both
+  environments — confirmed via a scripted subscribe, not just SQL (SQL here doesn't
+  support `LENGTH()` as an aggregate).
+- Both environments migrated non-destructively (`Created columns ... (default: ...)`,
+  not a wipe) after fixing the column-ordering issue; Maincloud's tick counter ran
+  straight through past 3000, unaffected.
+- A two-connection sync check (same pattern as every prior checkpoint) confirms
+  `world_config`/`terrain`/`creature`/`food` all still sync live with no refresh.
+- The three static assets are real, valid PNGs (hand-encoded via Node's built-in
+  `zlib` — no image tool was available) at their exact required dimensions, confirmed
+  by decoding one back and checking specific pixel values (including that the
+  wordmark's alpha channel is genuinely 0 at the corners and 255 at opaque centers, not
+  just visually appearing transparent in a viewer). All three serve correctly from
+  `public/` (`curl` confirmed 200s with the exact byte sizes written), and the rendered
+  `<meta property="og:image">`/`twitter:image` tags resolve to correct absolute URLs.
+
+**Not verified, same reason as the canvas renderer above:** what any of this actually
+*looks like*. The blob/blur/color-field technique is implemented exactly as designed
+and I can reason about why it should look like soft biome fields, but I have not seen
+it — no browser this session, same limitation as before. This compounds with the
+canvas item above: please look at the actual thing before trusting either description.

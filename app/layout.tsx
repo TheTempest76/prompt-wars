@@ -2,9 +2,29 @@ import type { Metadata } from 'next';
 import { Providers } from './providers';
 import './globals.css';
 
+// Set this to the real deployed origin before sharing launch posts —
+// og:image/twitter:image URLs resolve relative to it, and crawlers need an
+// absolute URL, not a relative one.
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3001';
+const TITLE = 'Prompt Wars';
+const DESCRIPTION =
+  'A shared petri dish of luminous, LLM-compiled creatures that keeps living whether or not anyone is watching.';
+
 export const metadata: Metadata = {
-  title: 'SpacetimeDB Next.js App',
-  description: 'A Next.js app powered by SpacetimeDB',
+  metadataBase: new URL(SITE_URL),
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: {
+    title: TITLE,
+    description: DESCRIPTION,
+    images: [{ url: '/og-image.png', width: 1200, height: 630 }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: TITLE,
+    description: DESCRIPTION,
+    images: ['/og-image.png'],
+  },
 };
 
 export default function RootLayout({

@@ -7,6 +7,55 @@ interface WorldCanvasProps {
   gridSize: number;
   creatures: readonly Creature[];
   food: readonly Food[];
+  terrainCells: string | undefined;
+}
+
+// Dim, desaturated base colour per biome index (0 bloom, 1 cold, 2 vent,
+// 3 barren — matches spacetimedb/src/index.ts's BIOME_* constants). Kept
+// dark on purpose: creatures/food are the only saturated things on screen.
+const BIOME_BASE_RGB: [number, number, number][] = [
+  [30, 92, 58], // nutrient bloom -- dim green
+  [38, 66, 108], // cold shelf -- dim blue
+  [118, 58, 32], // thermal vent -- dim orange
+  [50, 46, 42], // barren -- dim neutral
+];
+const FOOD_COLOR = '#9dffcf';
+const VOID_COLOR = '#05070c'; // outside the dish, when panned past the edge
+
+// Cheap deterministic per-cell hash for a little brightness jitter texture
+// on the terrain — not real noise, just enough grain to avoid flat blobs.
+function hashCell(x: number, y: number): number {
+  let h = (x * 374761393 + y * 668265263) | 0;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 4294967296; // [0, 1)
+}
+
+// One pixel per world cell. The blurred, soft-field look isn't a blur
+// filter — it's this tiny texture drawn hugely upscaled with the canvas's
+// own bilinear image smoothing, which turns hard per-cell boundaries into
+// smooth gradients for free.
+function buildTerrainTexture(cells: string, size: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const idx = y * size + x;
+      const biome = Number(cells[idx]);
+      const [r, g, b] = BIOME_BASE_RGB[biome] ?? BIOME_BASE_RGB[0];
+      const jitter = 1 + (hashCell(x, y) - 0.5) * 0.35;
+      const p = idx * 4;
+      img.data[p] = Math.min(255, r * jitter);
+      img.data[p + 1] = Math.min(255, g * jitter);
+      img.data[p + 2] = Math.min(255, b * jitter);
+      img.data[p + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
 }
 
 interface Camera {
@@ -39,7 +88,7 @@ function isTypingTarget(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true;
 }
 
-export function WorldCanvas({ gridSize, creatures, food }: WorldCanvasProps) {
+export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -54,6 +103,15 @@ export function WorldCanvas({ gridSize, creatures, food }: WorldCanvasProps) {
   gridSizeRef.current = gridSize;
   const foodRef = useRef(food);
   foodRef.current = food;
+  const terrainCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Terrain never changes after generation, so this texture is built once
+  // per (terrainCells, gridSize) pair, not per frame.
+  useEffect(() => {
+    if (terrainCells && gridSize > 0 && terrainCells.length === gridSize * gridSize) {
+      terrainCanvasRef.current = buildTerrainTexture(terrainCells, gridSize);
+    }
+  }, [terrainCells, gridSize]);
 
   const viewportRef = useRef({ cssWidth: 0, cssHeight: 0 });
   const minZoomRef = useRef(MIN_ZOOM_ABS);
@@ -179,7 +237,7 @@ export function WorldCanvas({ gridSize, creatures, food }: WorldCanvasProps) {
     const size = gridSizeRef.current;
 
     ctx.clearRect(0, 0, cssWidth, cssHeight);
-    ctx.fillStyle = '#0b1020';
+    ctx.fillStyle = VOID_COLOR; // outside the dish, visible once panned past the edge
     ctx.fillRect(0, 0, cssWidth, cssHeight);
 
     // One helper, all drawing goes through it -- no scattered offset math.
@@ -191,26 +249,53 @@ export function WorldCanvas({ gridSize, creatures, food }: WorldCanvasProps) {
     if (size > 0) {
       const topLeft = worldToScreen(0, 0);
       const bottomRight = worldToScreen(size, size);
-      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      const w = bottomRight.x - topLeft.x;
+      const h = bottomRight.y - topLeft.y;
+
+      // The dish itself: a tiny (gridSize x gridSize) texture drawn hugely
+      // upscaled. Bilinear image smoothing does the soft-field blur for
+      // free -- no blur filter, no per-frame cost beyond one drawImage.
+      const terrainCanvas = terrainCanvasRef.current;
+      if (terrainCanvas) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(terrainCanvas, topLeft.x, topLeft.y, w, h);
+      }
+
+      // Dish rim.
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
       ctx.lineWidth = 1;
-      ctx.strokeRect(topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
+      ctx.strokeRect(topLeft.x, topLeft.y, w, h);
     }
 
-    ctx.fillStyle = 'rgba(120,220,120,0.9)';
+    // Food: small bright particles with a faint bloom -- the only other
+    // saturated thing on screen besides creatures.
     for (const f of foodRef.current) {
       const p = worldToScreen(f.x + 0.5, f.y + 0.5);
-      const r = Math.max(1, cam.zoom * 0.12);
+      const r = Math.max(1.5, cam.zoom * 0.1);
+
+      const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
+      bloom.addColorStop(0, FOOD_COLOR);
+      bloom.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = bloom;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r * 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = FOOD_COLOR;
       ctx.beginPath();
       ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx.fill();
     }
 
+    // Creatures: glowing organisms. A firm dark outline keeps lineage
+    // colour reading clearly against every biome, not just the ones it
+    // happens to contrast with by luck.
     for (const entry of interpRef.current.values()) {
       const t = Math.min(1, (now - entry.changedAt) / TICK_INTERVAL_MS);
       const wx = entry.prevX + (entry.currX - entry.prevX) * t + 0.5;
       const wy = entry.prevY + (entry.currY - entry.prevY) * t + 0.5;
       const p = worldToScreen(wx, wy);
-      const radius = Math.max(2, entry.size * cam.zoom * 0.5);
+      const radius = Math.max(3, entry.size * cam.zoom * 0.5);
 
       const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius * 1.8);
       glow.addColorStop(0, entry.color);
@@ -224,8 +309,8 @@ export function WorldCanvas({ gridSize, creatures, food }: WorldCanvasProps) {
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-      ctx.lineWidth = Math.max(1, radius * 0.15);
+      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+      ctx.lineWidth = Math.max(1, radius * 0.18);
       ctx.stroke();
     }
   }, []);
@@ -360,7 +445,7 @@ export function WorldCanvas({ gridSize, creatures, food }: WorldCanvasProps) {
         width: '100%',
         aspectRatio: '1',
         maxHeight: '75vh',
-        background: '#0b1020',
+        background: VOID_COLOR,
         borderRadius: 8,
         overflow: 'hidden',
         touchAction: 'none',

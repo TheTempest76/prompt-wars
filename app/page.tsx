@@ -1,6 +1,7 @@
 import { PersonList } from './PersonList';
 import { WorldView } from './WorldView';
 import { SpawnCreature } from './SpawnCreature';
+import { FirstLoadOverlay } from './FirstLoadOverlay';
 import { fetchPeople } from '../lib/spacetimedb-server';
 
 export default async function Home() {
@@ -17,7 +18,8 @@ export default async function Home() {
 
   return (
     <main style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>
-      <h1>SpacetimeDB Next.js App</h1>
+      <FirstLoadOverlay />
+      <h1>Prompt Wars</h1>
       <PersonList initialPeople={initialPeople} />
       <WorldView />
       <SpawnCreature />

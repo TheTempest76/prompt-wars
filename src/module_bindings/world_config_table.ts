@@ -18,4 +18,12 @@ export default __t.row({
   rngSeed: __t.u64().name("rng_seed"),
   tickCount: __t.u64().name("tick_count"),
   lastTickAt: __t.timestamp().name("last_tick_at"),
+  bloomFoodMult: __t.f32().name("bloom_food_mult"),
+  bloomBurnMult: __t.f32().name("bloom_burn_mult"),
+  coldFoodMult: __t.f32().name("cold_food_mult"),
+  coldBurnMult: __t.f32().name("cold_burn_mult"),
+  ventFoodMult: __t.f32().name("vent_food_mult"),
+  ventBurnMult: __t.f32().name("vent_burn_mult"),
+  barrenFoodMult: __t.f32().name("barren_food_mult"),
+  barrenBurnMult: __t.f32().name("barren_burn_mult"),
 });

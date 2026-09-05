@@ -58,6 +58,12 @@ export const SpawnResult = __t.object("SpawnResult", {
 });
 export type SpawnResult = __Infer<typeof SpawnResult>;
 
+export const Terrain = __t.object("Terrain", {
+  id: __t.u64(),
+  cells: __t.string(),
+});
+export type Terrain = __Infer<typeof Terrain>;
+
 export const TickSchedule = __t.object("TickSchedule", {
   scheduledId: __t.u64(),
   scheduledAt: __t.scheduleAt(),
@@ -72,6 +78,14 @@ export const WorldConfig = __t.object("WorldConfig", {
   rngSeed: __t.u64(),
   tickCount: __t.u64(),
   lastTickAt: __t.timestamp(),
+  bloomFoodMult: __t.f32(),
+  bloomBurnMult: __t.f32(),
+  coldFoodMult: __t.f32(),
+  coldBurnMult: __t.f32(),
+  ventFoodMult: __t.f32(),
+  ventBurnMult: __t.f32(),
+  barrenFoodMult: __t.f32(),
+  barrenBurnMult: __t.f32(),
 });
 export type WorldConfig = __Infer<typeof WorldConfig>;
 

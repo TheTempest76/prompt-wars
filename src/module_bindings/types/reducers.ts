@@ -7,13 +7,17 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
 import AddReducer from "../add_reducer";
+import RegenerateTerrainReducer from "../regenerate_terrain_reducer";
 import SayHelloReducer from "../say_hello_reducer";
+import SetBiomeMultipliersReducer from "../set_biome_multipliers_reducer";
 import SetGridSizeReducer from "../set_grid_size_reducer";
 import SetLlmKeyReducer from "../set_llm_key_reducer";
 import SetPopulationCapReducer from "../set_population_cap_reducer";
 
 export type AddParams = __Infer<typeof AddReducer>;
+export type RegenerateTerrainParams = __Infer<typeof RegenerateTerrainReducer>;
 export type SayHelloParams = __Infer<typeof SayHelloReducer>;
+export type SetBiomeMultipliersParams = __Infer<typeof SetBiomeMultipliersReducer>;
 export type SetGridSizeParams = __Infer<typeof SetGridSizeReducer>;
 export type SetLlmKeyParams = __Infer<typeof SetLlmKeyReducer>;
 export type SetPopulationCapParams = __Infer<typeof SetPopulationCapReducer>;

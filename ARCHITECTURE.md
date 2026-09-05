@@ -22,6 +22,11 @@ into `schema.ts` + reducers until it actually hurts to scroll — see "Why one f
 | How a compiled param actually changes behavior | `seeksFood`/`fleesLarger` in the movement block, `aggression` via `AGGRESSION_ENERGY_SCALE` in the energy block — all inside the per-creature loop in `tick` |
 | The spawn form / plain-language result text | `app/SpawnCreature.tsx` — `useProcedure(procedures.spawnFromPrompt)`, renders the returned `summary` |
 | Per-creature glyph/color, plain-language behavior summary | `describeCreatureParams()` (the summary text) and the `creature.glyph`/`creature.color` columns (the visual), both in `spacetimedb/src/index.ts` |
+| Biome food/burn multipliers | `world_config.{bloom,cold,vent,barren}{Food,Burn}Mult` — retune live with `spacetime call prompt-wars set_biome_multipliers <0-3> <foodMult> <burnMult> --server <env>`, no republish |
+| How terrain is generated / how many blobs per biome | `generateTerrainCells()` (Voronoi-style: scatter `TERRAIN_SEEDS_PER_BIOME` random points per biome, assign each cell to its nearest one) — called from `init`, `setGridSize`, and standalone via `regenerateTerrain` |
+| How the food-spawn/energy-burn multipliers actually affect the tick | `multiplierForBiome()` + `biomeAt()` (pure lookups) and their two call sites in `tick`: the per-creature burn calculation, and the food-spawn probability check |
+| The terrain's visual palette (biome colors, food color, void color) | `BIOME_BASE_RGB`, `FOOD_COLOR`, `VOID_COLOR` in `app/WorldCanvas.tsx` — the *only* three things to touch to restyle the theme |
+| The static branding images (og:image, hero, wordmark) | `public/og-image.png` / `hero.png` / `wordmark.png` — see "Static assets" below for exact dimensions and how to swap them |
 
 ## Why one file
 
@@ -63,6 +68,7 @@ own). Everything it needs to touch:
 | How far you can pan past the world's edge | the `margin` calculation in `clampCamera` |
 | Creature circle size / glow / outline | the per-creature draw block inside `draw()` — `radius`, the `createRadialGradient` call, the stroke at the end |
 | Food dot appearance | the food loop in `draw()`, just above the creature loop |
+| The terrain texture (soft biome fields, blurred boundaries) | `buildTerrainTexture()` — builds a tiny `gridSize x gridSize` offscreen canvas, one pixel per cell; `draw()` then `drawImage()`s it hugely upscaled, and the browser's own bilinear smoothing turns the hard per-pixel edges into the soft blurred look. No blur filter, no image asset — see `BIOME_BASE_RGB` for the per-biome colors and `hashCell()` for the per-cell brightness jitter |
 | Position interpolation (the tick-to-tick lerp) | the `useEffect` watching `creatures` (builds `interpRef`) + the `t = ...` line inside `draw()`. `TICK_INTERVAL_MS` must match the server's real tick interval (`TICK_INTERVAL_MICROS` in `spacetimedb/src/index.ts`) or creatures will lerp too fast/slow relative to when the next tick actually lands |
 | Pan/pinch behavior | `onPointerDown`/`onPointerMove`/`endPointer` — pan is the 1-pointer branch, pinch-to-zoom-around-midpoint is the 2-pointer branch |
 | Keyboard bindings | the key-name arrays in the `keydown` handler and the `loop()` function's key-to-`dx/dy/zoomMul` mapping |
@@ -75,3 +81,24 @@ never eased, only creature movement is), and no per-frame React re-render for dr
 `foodRef`, `gridSizeRef`, `interpRef` — so `draw()` never needs recreating and drawing
 is fully decoupled from React's render cycle; only pan/zoom/keyboard *inputs* go through
 `setCamera`, which is intentionally kept as real React state per the actual requirement).
+
+## Static assets (`public/`) and branding
+
+Three placeholder PNGs, hand-encoded (no image tool was available when these were
+created — see the exact dimensions below if you regenerate them with something better):
+
+| File | Dimensions | Used by | Notes |
+|---|---|---|---|
+| `public/og-image.png` | **1200×630** | `app/layout.tsx` → `metadata.openGraph.images` / `metadata.twitter.images` | The standard Open Graph/Twitter card size — don't deviate, crawlers crop to this aspect ratio |
+| `public/hero.png` | **1600×900** (16:9) | `app/FirstLoadOverlay.tsx`, as a `background-image` with `background-size: cover` | Covers any viewport including mobile portrait via `cover`; doesn't need to be portrait itself |
+| `public/wordmark.png` | **800×200** (4:1), transparent background | `app/FirstLoadOverlay.tsx`, as an `<img>` | Currently a geometric placeholder (glowing dots, no rendered text) — no font rasterizer was available to draw an actual logotype by hand; swap for real artwork whenever you have it, same filename, no code changes needed |
+
+`NEXT_PUBLIC_SITE_URL` (in `.env.local`, alongside the `SPACETIMEDB_*` vars) must be the
+real deployed origin before you post a launch link anywhere — `metadata.metadataBase` in
+`app/layout.tsx` uses it to resolve `og:image` to an absolute URL, and it currently
+defaults to `http://localhost:3001`.
+
+`app/FirstLoadOverlay.tsx` shows once per browser (a `localStorage` flag), dismisses on
+tap anywhere, and is the only thing in this project using `<img>` instead of drawing —
+intentional, since it's outside the game world entirely and next/image's optimization
+pipeline is unneeded overhead for two static files.

@@ -17,9 +17,11 @@ export function WorldView() {
   const [creatures] = useTable(tables.creature);
   const [foodRows] = useTable(tables.food);
   const [events] = useTable(tables.event_log);
+  const [terrainRows] = useTable(tables.terrain);
 
   const config = configs[0];
   const gridSize = config ? Number(config.gridSize) : 0;
+  const terrainCells = terrainRows[0]?.cells;
 
   const recentEvents = [...events]
     .sort((a, b) =>
@@ -39,7 +41,12 @@ export function WorldView() {
       </p>
 
       {gridSize > 0 && (
-        <WorldCanvas gridSize={gridSize} creatures={creatures} food={foodRows} />
+        <WorldCanvas
+          gridSize={gridSize}
+          creatures={creatures}
+          food={foodRows}
+          terrainCells={terrainCells}
+        />
       )}
 
       <h3>Recent events</h3>
