@@ -24,4 +24,5 @@ export default __t.row({
   prompt: __t.string(),
   isPredator: __t.bool().name("is_predator"),
   kills: __t.u32(),
+  owner: __t.option(__t.identity()),
 });

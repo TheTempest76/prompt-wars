@@ -27,4 +27,5 @@ export default __t.row({
   barrenFoodMult: __t.f32().name("barren_food_mult"),
   barrenBurnMult: __t.f32().name("barren_burn_mult"),
   foodSpawnPerTick: __t.u32().name("food_spawn_per_tick"),
+  tickIntervalMicros: __t.u64().name("tick_interval_micros"),
 });

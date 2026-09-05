@@ -33,7 +33,12 @@ aren't re-derived or re-argued every session.
   finding any (observed directly: it crashed to zero). Food is scaled ~3x, not the full
   ~14x that would preserve the original 80×80 density, as a deliberate tradeoff against
   canvas draw cost on mobile (unverified on a real device) — retune via `setFoodConfig`
-  if survival still looks too hard or the world looks too sparse.
+  if survival still looks too hard or the world looks too sparse. **Still an open
+  tuning question, not resolved:** seeding 30 fresh creatures produced real reproduction
+  (visible in `event_log`), but net population still trended down afterward (32 → 15 on
+  `local`, 32 → 8 on `maincloud` over the following minutes) rather than climbing toward
+  the 50 cap — starvation is currently outpacing reproduction at 350/15. Don't read the
+  cap as a live population target; it's a ceiling, not evidence of balance.
 - **Default camera view is zoomed in, not fit-to-whole-world.** On first load (and on
   pressing `0`), `WorldCanvas` shows `INITIAL_VIEW_FRACTION` (18%) of the world, centered
   — panning outward reveals the rest. Zooming all the way out still reaches the *whole*
@@ -81,10 +86,70 @@ aren't re-derived or re-argued every session.
   one bound at a time without thinking about the others. Client (`app/WorldCanvas.tsx`)
   renders `isPredator` rows as a sharp red/white diamond, never the soft glow circle
   every other entity gets — the whole point is reading as a threat with no legend.
+- **Spawn-time LLM output drives glyph, behavior, *and* habitat.** The system prompt
+  (`CREATURE_COMPILE_SYSTEM_PROMPT`) requires a real emoji for `glyph` (never a bare
+  letter — "closest real-world match") and a `habitat` field
+  (`"bloom"|"cold"|"vent"|"barren"|"any"`), inferred from cues in the prompt text
+  (fire/lava→vent, ice/snow→cold, plant/jungle→bloom, desert/rock→barren). `clampHabitat`
+  parses it and is kept **separate** from `CreatureParams`/`DEFAULT_CREATURE_PARAMS` —
+  don't fold it into that struct, several call sites spread `DEFAULT_CREATURE_PARAMS`
+  directly into `creature.insert()` and an extra field there breaks type-checking.
+  `pickSpawnPosition` then reservoir-samples one matching-biome cell from
+  `terrain.cells` in a single pass (falls back to uniform-random if the habitat is
+  `"any"` or has no matching cells) — spawn location is a genuine biome-biased
+  placement, not just flavor text. `LLM_MAX_TOKENS` is `800`, not the more obvious
+  `500` — this model burns tokens on hidden reasoning before `content`, and 500
+  measurably truncated ~13% of live spawns before they reached `glyph`/`habitat`,
+  silently falling back to defaults; if you see a wave of 🦠-default spawns, this budget
+  is the first thing to check, not the prompt.
+- **Predators can also be spawned manually**, not just by the ecological
+  population/food trigger — `spawnPredator` (no args) inserts one directly, gated by
+  `PREDATOR_MAX_ACTIVE` (currently 2) so a human mashing the button can't do what the
+  bounded-lifespan design specifically prevents. CLI: see quick reference below.
+- **Size growth from eating must read as visible on-canvas, not just present in data.**
+  `SIZE_GROWTH_PER_MEAL` (`0.15`) and `MAX_SIZE` (`3`, up from a starting size of `1`)
+  are tuned together so a well-fed creature visibly triples in on-screen glyph size
+  within a normal session — `app/WorldCanvas.tsx` sizes the emoji font directly off
+  `size * zoom`, so this constant is the only lever that matters for "does growth look
+  dramatic," not any rendering code.
+- **Tick speed is live-tunable, not just `world_config.tickIntervalMicros` for display.**
+  `setTickSpeed(intervalMicros)` updates `tick_schedule`'s actual `scheduledAt` *and* the
+  `world_config.tickIntervalMicros` mirror in the same call, specifically so they can't
+  drift — the client reads the mirror to keep position-interpolation timing accurate at
+  whatever speed the tick is actually running. **Gotcha that cost a debugging pass:**
+  `tick_schedule.scheduledId` is `autoInc`, so its live row id is *not* `0n` the way
+  `world_config`/`terrain`'s fixed-id singleton rows are — looking it up via
+  `.scheduledId.find(0n)` silently finds nothing and no-ops the reschedule while still
+  writing the `world_config` mirror, leaving the two out of sync with no error. Look the
+  row up via `[...ctx.db.tick_schedule.iter()][0]` instead.
+- **The canvas has a fullscreen toggle** (top-right button in `WorldCanvas.tsx`, native
+  `Element.requestFullscreen()`/`document.exitFullscreen()`, tracked via the
+  `fullscreenchange` event rather than assumed from the click). No polyfill, no vendor
+  prefixes — this targets evergreen mobile/desktop browsers only. The existing
+  ResizeObserver + `fitCamera` already recompute correctly for the fullscreen
+  viewport's aspect ratio; nothing about the sizing pipeline needed to change for this.
 - **Determinism:** don't rely on bare `ctx.random()` for anything you need to explain
   after the fact — it's seeded from `ctx.timestamp`, not from table state. Store an
   explicit `rngSeed: t.u64()` column on `world_config` and advance it yourself each
   tick, so tick N's outcome is derivable from tick N's row data alone.
+- **Creatures show their spawner's initials, derived from `person`, not a separate
+  identity/profile table.** `person` stays an append-only guestbook (`add` still just
+  inserts — never upserts or deletes) but every row now also carries `owner:
+  t.option(t.identity())` and `createdAt: t.timestamp()`; the client reduces that to
+  "this identity's most-recent name" (max `createdAt` per `owner`) entirely itself —
+  no server view for this, both columns are on the already-public `person` table. A
+  spawned creature's `owner` (same `t.option(t.identity())` pattern, appended to
+  `creature`) is `ctx.sender` for an LLM spawn, inherited from the parent on
+  reproduction, and always `undefined` for seed/predator creatures (never
+  player-spawned). `app/WorldCanvas.tsx` looks up `entry.ownerKey` in the initials map
+  at *draw time* (not baked into `InterpEntry` once) so renaming yourself updates every
+  one of your creatures' labels within a frame, not just the next time their row
+  happens to change. **Gotcha this one already tripped:** `Identity`/`Timestamp` are
+  class instances — fine inside a client-only `useTable` subscription, but Next.js's
+  server→client prop boundary rejects them (`next build`'s prerender step, not `tsc`,
+  is what caught it). `lib/spacetimedb-server.ts`'s SSR `fetchPeople()` maps rows down
+  to `{ name }` before returning, specifically to avoid this — don't widen `PersonData`
+  back to the full generated row without re-stripping non-plain fields first.
 - **LLM provider: Groq (api.groq.com), not Claude/OpenAI/xAI.** Easy to confuse with
   xAI's unrelated "Grok" — a `gsk_...` key prefix means Groq. `GROK_MODEL` in
   `spacetimedb/src/index.ts` names the exact model id — verify it against
@@ -203,6 +268,16 @@ spacetime call prompt-wars regenerate_terrain --server local               # re-
 # Retune population/food live
 spacetime call prompt-wars set_population_cap 60 --server local
 spacetime call prompt-wars set_food_config 120 5 --server local            # cap, spawnPerTick
+
+# Spawn a creature from a text prompt (LLM picks emoji glyph, behavior, and habitat)
+spacetime call prompt-wars spawn_from_prompt '"a frost wolf hunting across arctic ice"' --server local
+
+# Manually spawn a predator (world-only mechanic; capped at PREDATOR_MAX_ACTIVE, currently 2)
+spacetime call prompt-wars spawn_predator --server local
+
+# Speed up/slow down the tick (microseconds; default 2_000_000 = 2s)
+spacetime call prompt-wars set_tick_speed 500000 --server local           # 4x faster
+spacetime call prompt-wars set_tick_speed 2000000 --server local          # back to default
 ```
 
 **Regenerate bindings any time you add/remove/rename a table, column, reducer,
@@ -325,6 +400,14 @@ ctx.db.tick_timer.insert({
 
 The deprecated form is `table({ scheduled: () => reducerFn }, ...)` — don't use it,
 even if you see it in older examples; prefer `onSchedule` on the reducer/procedure.
+
+**Gotcha:** a scheduled table's primary key is `autoInc`, so its live row id is
+whatever the database assigned — not necessarily `0n`, even though you inserted it as
+`0n` in `init()` (autoInc rewrites it on insert). A reducer that later needs to update
+that row (e.g. to change the interval) must look it up, e.g.
+`[...ctx.db.tick_timer.iter()][0]`, not assume `.scheduledId.find(0n)` — the wrong
+assumption silently finds nothing and no-ops the update, with no error, no exception,
+nothing in the logs.
 
 ### Custom types
 

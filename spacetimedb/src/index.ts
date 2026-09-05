@@ -1,5 +1,5 @@
 import { schema, table, t, SenderError } from 'spacetimedb/server';
-import { ScheduleAt, TimeDuration } from 'spacetimedb';
+import { ScheduleAt, TimeDuration, Timestamp } from 'spacetimedb';
 
 // See CLAUDE.md "This project's decisions".
 const TICK_INTERVAL_MICROS = 2_000_000n; // 2 seconds
@@ -11,7 +11,7 @@ const EVENT_LOG_MAX_ROWS = 50;
 // relying on it — model availability there changes often.
 const GROK_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROK_MODEL = 'openai/gpt-oss-20b'; // reasoning model — see LLM_MAX_TOKENS below
-const LLM_MAX_TOKENS = 500; // must cover reasoning tokens *and* the JSON content
+const LLM_MAX_TOKENS = 800; // must cover reasoning tokens *and* the JSON content -- bumped from 500 after live seeding showed ~13% of calls truncating before emitting glyph/habitat and falling back to defaults
 const LLM_TIMEOUT_MILLIS = 4000;
 const MAX_PROMPT_LENGTH = 200;
 
@@ -41,7 +41,7 @@ const ENERGY_BURN_PER_TICK = 2;
 const ENERGY_FROM_FOOD = 30;
 const MAX_ENERGY = 100;
 const STARVING_ENERGY_THRESHOLD = 20;
-const SIZE_GROWTH_PER_MEAL = 0.05;
+const SIZE_GROWTH_PER_MEAL = 0.15; // bumped 3x from 0.05 -- growth needs to be visible on-canvas within a short session, not just present in the data
 const SIZE_SHRINK_PER_TICK = 0.02;
 const MIN_SIZE = 0.3;
 const MAX_SIZE = 3;
@@ -170,6 +170,34 @@ function multiplierForBiome(
   }
 }
 
+// Approximate spawn location from a prompt's inferred habitat: reservoir-
+// samples one matching-biome cell in a single pass (no full match list
+// allocated for what can be a 90,000+ cell scan) so a "cold" creature lands
+// somewhere on a cold shelf, not just anywhere on the map. biome < 0 (no
+// preference) or no terrain/biome match falls back to uniform random --
+// this always returns a usable position, never blocks a spawn.
+function pickSpawnPosition(
+  rng: ReturnType<typeof makeRng>,
+  cells: string | undefined,
+  size: number,
+  biome: number
+): { x: number; y: number } {
+  if (biome >= 0 && cells && cells.length === size * size) {
+    let chosenIdx = -1;
+    let seen = 0;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells.charCodeAt(i) - 48 === biome) {
+        seen++;
+        if (rng.int(seen) === 0) chosenIdx = i; // uniform reservoir sample among matches so far
+      }
+    }
+    if (chosenIdx !== -1) {
+      return { x: chosenIdx % size, y: Math.floor(chosenIdx / size) };
+    }
+  }
+  return { x: rng.int(size), y: rng.int(size) };
+}
+
 // A small (w x h) grid of independent random values in [0, 1) — the
 // low-resolution "control points" a value-noise field interpolates between.
 function randomGrid(rng: ReturnType<typeof makeRng>, w: number, h: number): number[] {
@@ -254,11 +282,18 @@ const DEFAULT_CREATURE_PARAMS: CreatureParams = {
   seeksFood: true,
   fleesLarger: false,
   aggression: 5,
-  glyph: 'C',
+  glyph: '🦠', // generic organism -- fits the theme better than a bare letter
   color: '#8888ff',
 };
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+const HABITAT_NAME_TO_BIOME: Record<string, number> = {
+  bloom: BIOME_BLOOM,
+  cold: BIOME_COLD,
+  vent: BIOME_VENT,
+  barren: BIOME_BARREN,
+};
+const HABITAT_DESCRIPTIONS = ['a nutrient bloom', 'a cold shelf', 'a thermal vent', 'the barrens'];
 
 // Never trust what an LLM hands back. Every field falls back to
 // DEFAULT_CREATURE_PARAMS independently if it's missing, the wrong type, or
@@ -282,6 +317,18 @@ function clampCreatureParams(raw: unknown): CreatureParams {
   return { seeksFood, fleesLarger, aggression, glyph, color };
 }
 
+// Habitat is deliberately NOT a field on CreatureParams/the creature row --
+// it only ever affects where spawnFromPrompt places the new row, once, and
+// keeping it separate means DEFAULT_CREATURE_PARAMS stays exactly the shape
+// that gets spread into ctx.db.creature.insert() everywhere (init, tick
+// reproduction, spawnFromPrompt) without an excess-property risk anywhere.
+// -1 means no preference -- fall back to a uniform-random position.
+function clampHabitat(raw: unknown): number {
+  const r = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  const habitat = typeof r.habitat === 'string' ? r.habitat.toLowerCase().trim() : '';
+  return habitat in HABITAT_NAME_TO_BIOME ? HABITAT_NAME_TO_BIOME[habitat] : -1;
+}
+
 // Grok is asked for pure JSON but sometimes wraps it in a markdown fence
 // anyway — strip that defensively before JSON.parse rather than failing.
 function stripJsonFences(text: string): string {
@@ -290,10 +337,13 @@ function stripJsonFences(text: string): string {
   return fenced ? fenced[1] : trimmed;
 }
 
-function describeCreatureParams(params: CreatureParams): string {
+function describeCreatureParams(params: CreatureParams, habitatBiome: number): string {
   const parts = [params.seeksFood ? 'seeks food' : 'wanders randomly'];
   if (params.fleesLarger) parts.push('flees larger creatures');
   parts.push(`aggression ${params.aggression}/10`);
+  if (habitatBiome >= 0 && habitatBiome < HABITAT_DESCRIPTIONS.length) {
+    parts.push(`spawned near ${HABITAT_DESCRIPTIONS[habitatBiome]}`);
+  }
   return parts.join(', ') + '.';
 }
 
@@ -303,14 +353,23 @@ Output ONLY a single JSON object, no prose, no markdown fences, matching exactly
   "seeksFood": boolean,       // does it actively hunt for food, or just wander?
   "fleesLarger": boolean,     // does it flee from creatures bigger than itself?
   "aggression": integer 0-10, // 0 = passive, 10 = very aggressive
-  "glyph": <pick one character or emoji that visually fits it, e.g. "🦂" or "F">,
-  "color": <pick a hex color string that visually fits it, e.g. "#d94f2b">
+  "glyph": <a single emoji that best visually represents this specific creature -- always a real emoji, never a plain letter. Pick the closest real-world match, e.g. "🦂" for a scorpion, "🐧" for a penguin, "🐉" for a dragon>,
+  "color": <pick a hex color string that visually fits it, e.g. "#d94f2b">,
+  "habitat": <one of "bloom", "cold", "vent", "barren", or "any" -- which environment best fits this creature based on its description. Fire/heat/lava -> "vent". Ice/snow/arctic -> "cold". Plant/jungle/lush -> "bloom". Desert/wasteland/rock -> "barren". No clear preference -> "any">
 }`;
 
 const person = table(
   { public: true },
   {
     name: t.string(),
+    // Profile-name feature: owner/createdAt let the client find "the latest
+    // name this identity submitted" (filter by owner, max createdAt) without
+    // changing person into an upsert-per-identity table -- the guestbook
+    // stays an append-only log, this just makes it possible to derive a
+    // per-identity display name from it. Both optional/defaulted so
+    // pre-existing rows (from before this feature) don't need a migration.
+    owner: t.option(t.identity()).default(undefined),
+    createdAt: t.timestamp().default(new Timestamp(0n)),
   }
 );
 
@@ -345,6 +404,11 @@ const world_config = table(
     // new columns must be appended, never inserted mid-table. Retunable
     // live via setFoodConfig.
     foodSpawnPerTick: t.u32().default(DEFAULT_FOOD_SPAWN_PER_TICK),
+    // Mirrors tick_schedule's actual interval -- setTickSpeed updates both
+    // in the same call. This copy exists so the client can read the current
+    // speed (for accurate position-interpolation timing) without needing
+    // access to the private tick_schedule table.
+    tickIntervalMicros: t.u64().default(TICK_INTERVAL_MICROS),
   }
 );
 
@@ -393,6 +457,12 @@ const creature = table(
     // is ignored in favor of hunt/burn/despawn logic in `tick`.
     isPredator: t.bool().default(false),
     kills: t.u32().default(0),
+    // Profile-name feature: which identity spawned this creature, so the
+    // client can label it with that identity's latest `person.name`
+    // initials. Undefined for seed/predator creatures (never player-spawned)
+    // -- a reproduced child inherits its parent's owner, so a whole lineage
+    // stays tagged to whoever originally spawned it.
+    owner: t.option(t.identity()).default(undefined),
   }
 );
 
@@ -453,6 +523,7 @@ export const init = spacetimedb.init(ctx => {
       prompt: '(seed creature)',
       isPredator: false,
       kills: 0,
+      owner: undefined,
     });
   }
   for (let i = 0; i < INITIAL_FOOD_COUNT; i++) {
@@ -473,6 +544,7 @@ export const init = spacetimedb.init(ctx => {
     ventFoodMult: 2.2, ventBurnMult: 1.5,
     barrenFoodMult: 0.0, barrenBurnMult: 1.0,
     foodSpawnPerTick: DEFAULT_FOOD_SPAWN_PER_TICK,
+    tickIntervalMicros: TICK_INTERVAL_MICROS,
     rngSeed: rng.seed(),
     tickCount: 0n,
     lastTickAt: ctx.timestamp,
@@ -494,7 +566,7 @@ export const onDisconnect = spacetimedb.clientDisconnected(_ctx => {
 export const add = spacetimedb.reducer(
   { name: t.string() },
   (ctx, { name }) => {
-    ctx.db.person.insert({ name });
+    ctx.db.person.insert({ name, owner: ctx.sender, createdAt: ctx.timestamp });
   }
 );
 
@@ -524,6 +596,33 @@ export const setFoodConfig = spacetimedb.reducer(
     const state = ctx.db.world_config.id.find(0n);
     if (!state) return;
     ctx.db.world_config.id.update({ ...state, foodCap: cap, foodSpawnPerTick: spawnPerTick });
+  }
+);
+
+// Speed up or slow down the whole simulation live -- updates the real
+// schedule (tick_schedule.scheduledAt, which actually controls firing rate)
+// and world_config.tickIntervalMicros (a readable mirror the client uses to
+// keep position-interpolation timing accurate) in the same call, so they
+// can never drift apart. CLI: `spacetime call prompt-wars set_tick_speed
+// 500000 --server <env>` (500,000 = 0.5s = 4x faster than the 2s default).
+export const setTickSpeed = spacetimedb.reducer(
+  { intervalMicros: t.u64() },
+  (ctx, { intervalMicros }) => {
+    const state = ctx.db.world_config.id.find(0n);
+    if (!state) return;
+    // tick_schedule.scheduledId is autoInc -- unlike world_config/terrain's
+    // fixed id 0n, its real row id is whatever the DB assigned, so it must
+    // be looked up rather than assumed to be 0n (that mismatch silently
+    // no-opped the reschedule below while still writing the world_config
+    // mirror, leaving the two out of sync).
+    const schedule = [...ctx.db.tick_schedule.iter()][0];
+    if (schedule) {
+      ctx.db.tick_schedule.scheduledId.update({
+        ...schedule,
+        scheduledAt: ScheduleAt.interval(intervalMicros),
+      });
+    }
+    ctx.db.world_config.id.update({ ...state, tickIntervalMicros: intervalMicros });
   }
 );
 
@@ -591,6 +690,46 @@ export const setBiomeMultipliers = spacetimedb.reducer(
     }
   }
 );
+
+// Manual predator spawn, for testing/demos -- normally predators only
+// appear from ecological pressure in `tick` (see PREDATOR_SPAWN_POP_FOOD_RATIO).
+// Still respects PREDATOR_MAX_ACTIVE: this is a way to trigger a spawn on
+// demand, not a way around the population safety bound. CLI:
+// `spacetime call prompt-wars spawn_predator --server <env>`.
+export const spawnPredator = spacetimedb.reducer(ctx => {
+  const state = ctx.db.world_config.id.find(0n);
+  if (!state) return;
+  const activePredators = [...ctx.db.creature.iter()].filter(c => c.isPredator).length;
+  if (activePredators >= PREDATOR_MAX_ACTIVE) {
+    throw new SenderError(
+      `Already at the predator cap (${PREDATOR_MAX_ACTIVE}) — wait for one to despawn first.`
+    );
+  }
+  const rng = makeRng(state.rngSeed);
+  ctx.db.creature.insert({
+    id: 0n,
+    x: rng.int(state.gridSize),
+    y: rng.int(state.gridSize),
+    energy: PREDATOR_STARTING_ENERGY,
+    size: PREDATOR_SIZE,
+    glyph: PREDATOR_GLYPH,
+    color: PREDATOR_COLOR,
+    seeksFood: false,
+    fleesLarger: false,
+    aggression: 10,
+    prompt: '(predator)',
+    isPredator: true,
+    kills: 0,
+    owner: undefined,
+  });
+  ctx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
+  ctx.db.event_log.insert({
+    id: 0n,
+    tickNumber: state.tickCount,
+    message: 'A predator was manually spawned',
+    at: ctx.timestamp,
+  });
+});
 
 export const tick = spacetimedb.reducer(
   { onSchedule: tick_schedule },
@@ -801,6 +940,7 @@ export const tick = spacetimedb.reducer(
           prompt: current.prompt,
           isPredator: false,
           kills: 0,
+          owner: current.owner,
         });
         population++;
         logs.push(
@@ -861,6 +1001,7 @@ export const tick = spacetimedb.reducer(
           prompt: '(predator)',
           isPredator: true,
           kills: 0,
+          owner: undefined,
         });
         logs.push('A predator has appeared -- the population outgrew its food supply');
       }
@@ -929,6 +1070,7 @@ export const spawnFromPrompt = spacetimedb.procedure(
   (ctx, { prompt }) => {
     const trimmedPrompt = prompt.trim().slice(0, MAX_PROMPT_LENGTH);
     let params = DEFAULT_CREATURE_PARAMS;
+    let habitatBiome = -1; // -1 = no preference -> uniform random position
 
     const secret = ctx.withTx(tx => tx.db.llm_secret.id.find(0n));
     if (secret && trimmedPrompt.length > 0) {
@@ -954,7 +1096,9 @@ export const spawnFromPrompt = spacetimedb.procedure(
           const body = JSON.parse(res.text());
           const content = body?.choices?.[0]?.message?.content;
           if (typeof content === 'string') {
-            params = clampCreatureParams(JSON.parse(stripJsonFences(content)));
+            const parsed = JSON.parse(stripJsonFences(content));
+            params = clampCreatureParams(parsed);
+            habitatBiome = clampHabitat(parsed);
           }
         }
       } catch {
@@ -969,10 +1113,12 @@ export const spawnFromPrompt = spacetimedb.procedure(
       if ([...tx.db.creature.iter()].length >= state.populationCap) return undefined;
 
       const rng = makeRng(state.rngSeed);
+      const terrainCells = tx.db.terrain.id.find(0n)?.cells;
+      const pos = pickSpawnPosition(rng, terrainCells, state.gridSize, habitatBiome);
       const row = tx.db.creature.insert({
         id: 0n,
-        x: rng.int(state.gridSize),
-        y: rng.int(state.gridSize),
+        x: pos.x,
+        y: pos.y,
         energy: CHILD_STARTING_ENERGY,
         size: 1,
         glyph: params.glyph,
@@ -983,6 +1129,7 @@ export const spawnFromPrompt = spacetimedb.procedure(
         prompt: trimmedPrompt,
         isPredator: false,
         kills: 0,
+        owner: ctx.sender,
       });
       tx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
       return row;
@@ -994,6 +1141,6 @@ export const spawnFromPrompt = spacetimedb.procedure(
         summary: 'The world is full right now — try again once something dies.',
       };
     }
-    return { creatureId: child.id, summary: describeCreatureParams(params) };
+    return { creatureId: child.id, summary: describeCreatureParams(params, habitatBiome) };
   }
 );

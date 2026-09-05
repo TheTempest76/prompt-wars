@@ -1,5 +1,6 @@
 'use client';
 
+import { useMemo } from 'react';
 import { useTable } from 'spacetimedb/react';
 import { tables } from '../src/module_bindings';
 import { WorldCanvas } from './WorldCanvas';
@@ -18,10 +19,36 @@ export function WorldView() {
   const [foodRows] = useTable(tables.food);
   const [events] = useTable(tables.event_log);
   const [terrainRows] = useTable(tables.terrain);
+  // Small guestbook table -- a second subscription alongside PersonList's own
+  // is negligible here, unlike creature/food (see ARCHITECTURE.md).
+  const [people] = useTable(tables.person);
 
   const config = configs[0];
   const gridSize = config ? Number(config.gridSize) : 0;
   const terrainCells = terrainRows[0]?.cells;
+  const tickIntervalMs = config ? Number(config.tickIntervalMicros / 1000n) : 2000;
+
+  // Profile-name feature: each identity's latest submitted name, reduced to
+  // initials, keyed by Identity.toHexString() so WorldCanvas can label a
+  // creature with whoever owns it.
+  const ownerInitials = useMemo(() => {
+    const latest = new Map<string, { name: string; createdAt: bigint }>();
+    for (const p of people) {
+      if (!p.owner) continue;
+      const key = p.owner.toHexString();
+      const createdAt = p.createdAt.microsSinceUnixEpoch;
+      const existing = latest.get(key);
+      if (!existing || createdAt > existing.createdAt) {
+        latest.set(key, { name: p.name, createdAt });
+      }
+    }
+    const initials = new Map<string, string>();
+    for (const [key, v] of latest) {
+      const trimmed = v.name.trim();
+      if (trimmed.length > 0) initials.set(key, trimmed.slice(0, 2).toUpperCase());
+    }
+    return initials;
+  }, [people]);
 
   const recentEvents = [...events]
     .sort((a, b) =>
@@ -46,6 +73,8 @@ export function WorldView() {
           creatures={creatures}
           food={foodRows}
           terrainCells={terrainCells}
+          tickIntervalMs={tickIntervalMs}
+          ownerInitials={ownerInitials}
         />
       )}
 

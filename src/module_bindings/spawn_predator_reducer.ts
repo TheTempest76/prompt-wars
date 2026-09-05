@@ -10,8 +10,4 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  name: __t.string(),
-  owner: __t.option(__t.identity()),
-  createdAt: __t.timestamp().name("created_at"),
-});
+export default {};

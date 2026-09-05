@@ -1,11 +1,15 @@
 import { DbConnection, tables } from '../src/module_bindings';
-import { Person } from '../src/module_bindings/types';
-import type { Infer } from 'spacetimedb';
 
 const HOST = process.env.SPACETIMEDB_HOST ?? 'wss://maincloud.spacetimedb.com';
-const DB_NAME = process.env.SPACETIMEDB_DB_NAME ?? 'nextjs-ts';
+const DB_NAME = process.env.SPACETIMEDB_DB_NAME ?? 'prompt-wars';
 
-export type PersonData = Infer<typeof Person>;
+// Deliberately just `{ name }`, not the full generated Person row -- `owner`
+// (Identity) and `createdAt` (Timestamp) are class instances, and Next.js's
+// server->client component boundary rejects passing those directly (only
+// plain objects/built-ins cross it). PersonList only ever renders `.name`,
+// so this SSR path never needs the rest; the live `useTable` path (entirely
+// client-side, never crossing that boundary) still gets the full row.
+export type PersonData = { name: string };
 
 /**
  * Fetches the initial list of people from SpacetimeDB.
@@ -29,8 +33,9 @@ export async function fetchPeople(): Promise<PersonData[]> {
           .subscriptionBuilder()
           .onApplied(() => {
             clearTimeout(timeoutId);
-            // Get all people from the cache
-            const people = Array.from(conn.db.person.iter());
+            // Get all people from the cache -- mapped to a plain-object
+            // shape, see the PersonData comment above.
+            const people = Array.from(conn.db.person.iter()).map(p => ({ name: p.name }));
             conn.disconnect();
             resolve(people);
           })

@@ -53,18 +53,149 @@ npm run dev
 
 Then open **http://localhost:3001** (not 3000 — see gotcha below).
 
+## Changing a value in `spacetimedb/src/index.ts` — the full checklist
+
+Whether you tweaked a tuning constant (`SIZE_GROWTH_PER_MEAL`, `PREDATOR_MAX_ACTIVE`,
+`LLM_MAX_TOKENS`, ...), added a reducer, or changed a table — same steps, every time,
+in this order. Skipping a step is the #1 cause of "I changed the code but nothing
+happened" or "it works locally but not on the live site."
+
+```bash
+# 1. Build + typecheck the module first — catches mistakes before they touch a
+#    real database, local or Maincloud.
+spacetime build --module-path spacetimedb
+
+# 2. Publish to LOCAL first. Try your change here before Maincloud.
+spacetime publish prompt-wars --server local --yes
+# Read the "Database Migration Plan" it prints:
+#   - No output / only new tables/columns with defaults -> safe, non-destructive.
+#   - "Reordering table X requires a manual migration" -> you inserted a new column
+#     in the middle of a table instead of appending it at the end. Move it to the
+#     end of that table's field list and republish (see the column-ordering gotcha
+#     below) — do NOT reach for --delete-data to work around this.
+#   - "All clients will be disconnected due to breaking schema changes" -> expected
+#     for any new/changed column; not destructive by itself, just a reconnect blip.
+
+# 3. Regenerate client bindings from the now-published schema. The client
+#    (app/*.tsx) only ever sees types/fields that exist in src/module_bindings/ —
+#    skip this and new columns/reducers are invisible to the UI even though the
+#    database already has them.
+npm run spacetime:generate
+
+# 4. Typecheck AND build the Next.js app, not just tsc. `next build` catches things
+#    plain tsc doesn't (e.g. new columns of type Identity/Timestamp can't cross a
+#    Server->Client component prop boundary — this has actually happened, see
+#    CLAUDE.md's profile-name decision).
+npx tsc --noEmit
+npm run build
+
+# 5. Exercise the change directly, before touching the browser (see "Validating
+#    the SpacetimeDB half" in CLAUDE.md) — e.g.:
+spacetime call prompt-wars <your_reducer> <args> --server local
+spacetime sql prompt-wars --server local "SELECT * FROM <your_table>"
+
+# 6. Once it looks right on local, repeat the publish + generate on Maincloud too
+#    (generate again is required even though the schema is now identical to local's
+#    — it's a separate `spacetime generate` invocation, not shared state):
+spacetime publish prompt-wars --server maincloud --yes
+npm run spacetime:generate
+```
+
+**For the running UI to pick up the change:**
+- If your dev server (`npm run dev`) is pointed at **local** (the default —
+  `.env.local` has `ws://localhost:3000`): nothing else to do. It already holds a
+  live WebSocket subscription, so a republished reducer/schema and any new data show
+  up immediately, no refresh needed for data changes — but if `src/module_bindings/`
+  changed shape (step 3), **restart `npm run dev`** so Next.js picks up the new
+  generated types; a hot-reloaded page can otherwise hold stale bindings.
+- If it's pointed at **Maincloud** (`.env.local` has `wss://maincloud...`, per
+  "Watching the Maincloud world in the browser" below): same rule, restart
+  `npm run dev` after step 6's `spacetime:generate`.
+- If you're checking the **deployed Vercel site**, not local `npm run dev`: that site
+  always points at Maincloud already (see "Deploying the frontend to Vercel" below) —
+  once step 6 is done, the live site picks up new *data* immediately (same
+  WebSocket-subscription mechanism), but a new table/column/reducer *shape* needs a
+  new Vercel deployment (`git push` / redeploy) so its bundled `src/module_bindings/`
+  matches, the same reason local needs a dev-server restart.
+
 ### Publishing to Maincloud (the persistent, always-on deployment)
 
 ```bash
 npm run spacetime:publish        # publishes spacetimedb/ to Maincloud as "prompt-wars"
 ```
 
-Point the client at Maincloud by editing `.env.local`:
-```
-SPACETIMEDB_HOST=wss://maincloud.spacetimedb.com
-NEXT_PUBLIC_SPACETIMEDB_HOST=wss://maincloud.spacetimedb.com
-```
-(`SPACETIMEDB_DB_NAME` / `NEXT_PUBLIC_SPACETIMEDB_DB_NAME` stay `prompt-wars`.)
+`spacetime.json` sets `"server": "maincloud"`, so a bare `spacetime <cmd> prompt-wars`
+already targets Maincloud — `--server maincloud` on the commands below is just being
+explicit. `--server local` is the one you must always spell out. Any `--server maincloud`
+command needs you logged in first (`spacetime login`).
+
+### Watching the Maincloud world in the browser (see a published change live)
+
+Maincloud's tick runs forever with nobody connected, so it's the deployment to watch if
+you want to see the world actually evolve. To point the site at it and see the results
+rendered on screen:
+
+1. **Point both halves of the client at Maincloud** in `.env.local`. The browser bundle
+   and the server component read *separate* vars — set all four:
+   ```
+   SPACETIMEDB_HOST=wss://maincloud.spacetimedb.com
+   SPACETIMEDB_DB_NAME=prompt-wars
+   NEXT_PUBLIC_SPACETIMEDB_HOST=wss://maincloud.spacetimedb.com
+   NEXT_PUBLIC_SPACETIMEDB_DB_NAME=prompt-wars
+   ```
+   `wss://`, not `ws://` — Maincloud is TLS-only. `.env.local` is read once at Next
+   startup, so **restart `npm run dev`** after editing it or the browser stays pointed
+   wherever it already was.
+
+2. **Publish your change and make Maincloud's schema match the client bindings.**
+   `src/module_bindings/` is generated from `spacetimedb/` source; if Maincloud's
+   *published* schema is behind that source, the `world_config`/`creature`/`food`/
+   `terrain` subscription decodes to nothing and the World panel **renders blank with no
+   error** (this has happened — see the schema-mismatch gotcha below). Publish, then
+   confirm parity:
+   ```bash
+   npm run spacetime:publish                                  # push spacetimedb/ to Maincloud
+   npm run spacetime:generate                                 # regenerate bindings from source
+   spacetime describe prompt-wars --server maincloud --json   # the live Maincloud schema
+   spacetime describe prompt-wars --server local    --json    # should describe the same tables/columns
+   ```
+
+3. **Start the site and open it** — you do *not* need `spacetime start` running for
+   this; that's the local server, and nothing talks to it once `.env.local` points at
+   Maincloud.
+   ```bash
+   npm run dev        # http://localhost:3002   (or `npm run start` -> :3001 — use the port it prints)
+   ```
+
+4. **What you should see mapped out** (all rendered by `app/WorldView.tsx` ->
+   `app/WorldCanvas.tsx`, all live over one WebSocket — no refresh button anywhere):
+   - the **canvas world** — dark void, four soft-edged biome colour fields; drag / pinch,
+     or arrows / WASD / `+` / `-` / `0`, to pan and zoom. It opens at ~18% of the world;
+     press `0` or zoom out for the whole 300×300 grid.
+   - **creatures** as soft glowing coloured circles, each with its LLM-compiled
+     `glyph`/`color`, interpolated smoothly between the ~2-second ticks.
+   - **predators** as sharp red/white diamonds (no legend — they're meant to just read
+     as a threat).
+   - **food** as small dots.
+   - the **counts + recent-events panel** — population, food count, tick count, and the
+     last ~50 birth / death / predator log lines.
+   - the **spawn form** — type a description; it round-trips through Groq on Maincloud
+     and drops a creature into the same world every other viewer is watching.
+
+5. **Confirm it's live even with every tab closed** (headless, no browser needed):
+   ```bash
+   spacetime logs prompt-wars --server maincloud -f                                       # tail the tick
+   spacetime sql  prompt-wars --server maincloud "SELECT tick_count FROM world_config"    # re-run in 10s: it advanced
+   spacetime sql  prompt-wars --server maincloud "SELECT COUNT(*) AS n FROM creature"
+   spacetime sql  prompt-wars --server maincloud "SELECT * FROM event_log"                # recent births/deaths/predators
+   ```
+   Close every tab, wait, re-run the `tick_count` query — it keeps climbing. That's the
+   "runs forever whether or not anyone's watching" claim, and Maincloud is where it's
+   actually true (local only ticks while `spacetime start` is up).
+
+**Switching back to local:** copy `.env.local.example` over `.env.local` (`ws://localhost:3000`,
+all four vars), restart `npm run dev`, and make sure `spacetime start` and
+`npm run spacetime:publish:local` have both been run.
 
 ### Other useful commands
 
@@ -74,6 +205,44 @@ spacetime sql prompt-wars --server local "SELECT * FROM person"   # ad-hoc query
 spacetime publish --module-path spacetimedb --server local --delete-data=always --yes prompt-wars
                                                      # wipe + republish (schema conflict escape hatch)
 ```
+
+## Deploying the frontend to Vercel
+
+The Next.js app is a normal zero-config Vercel deploy — no `vercel.json` needed, Vercel
+auto-detects the framework from `next build`. What actually needs doing:
+
+1. **Import the GitHub repo** (`TheTempest76/prompt-wars`) into Vercel — dashboard →
+   Add New → Project → pick the repo. Leave Build/Install/Output commands on their
+   Next.js defaults.
+2. **Set the environment variables** (Project Settings → Environment Variables), applied
+   to **Production, Preview, and Development** — this is a single shared world, so every
+   deployment (including previews) should point at the same Maincloud database, never at
+   `localhost`:
+   ```
+   SPACETIMEDB_HOST=wss://maincloud.spacetimedb.com
+   SPACETIMEDB_DB_NAME=prompt-wars
+   NEXT_PUBLIC_SPACETIMEDB_HOST=wss://maincloud.spacetimedb.com
+   NEXT_PUBLIC_SPACETIMEDB_DB_NAME=prompt-wars
+   ```
+   `NEXT_PUBLIC_SITE_URL` is optional on Vercel — `app/layout.tsx` falls back to the
+   platform's own `VERCEL_URL` when it's unset, so preview deployments still get correct
+   `og:image` URLs. Set it explicitly only once you've attached a custom production
+   domain (otherwise OG images on the production alias would resolve to the
+   `*.vercel.app` URL instead).
+3. **Deploy.** The root page (`/`) prerenders statically at build time (it has no
+   per-request dynamic API usage), so the one-time server-side `fetchPeople()` call runs
+   during `next build`, not per request — a slow or failed Maincloud round-trip at build
+   time just falls back to an empty list (see the `try`/`catch` in `app/page.tsx`), it
+   doesn't fail the build. Everything that actually matters for gameplay (`world_config`/
+   `creature`/`food`/`terrain`/`event_log`) is subscribed to live, client-side, over the
+   SpacetimeDB WebSocket — same as local dev, just pointed at Maincloud.
+4. **The Groq key is independent of this Vercel setup.** It lives in Maincloud's private
+   `llm_secret` table, set once via `spacetime call prompt-wars set_llm_key '"gsk_..."'
+   --server maincloud` (snake_case reducer name on the CLI — see the gotchas section)
+   — never put it in Vercel's environment variables, the module reads it from the
+   database, not from `process.env`.
+5. **Custom domain:** once attached, update `NEXT_PUBLIC_SITE_URL` to it and redeploy
+   (env var changes require a redeploy to take effect — Vercel doesn't hot-reload them).
 
 ## When you MUST re-run `spacetime generate`
 
@@ -161,9 +330,17 @@ says so, and your edits are gone on the next `generate`.
   internal `reasoning` field before emitting `content`. A `max_tokens` sized for just
   the JSON answer (we started at 300) gets exhausted mid-reasoning, `content` comes back
   empty, and `JSON.parse('')` throws — silently triggering the fallback with no visible
-  error anywhere. Fixed with a bigger `max_tokens` (500) and `reasoning_effort: 'low'`
-  in the request body. If a Groq-backed spawn keeps landing on defaults, check
-  `finish_reason` in the raw response before suspecting anything else.
+  error anywhere. Fixed with a bigger `max_tokens` (originally 500, later 800 — see
+  below) and `reasoning_effort: 'low'` in the request body. If a Groq-backed spawn
+  keeps landing on defaults, check `finish_reason` in the raw response before
+  suspecting anything else. **Update:** 500 wasn't actually enough headroom — seeding
+  30 creatures in one batch showed ~13% landing on the default `🦠` glyph specifically
+  (not the whole fallback — just the `glyph`/`habitat` fields added later, which sit at
+  the *end* of the requested JSON and are the first casualty of a truncated response).
+  Bumped to 800 and re-ran the two prompts that had failed ("a tiny shrimp...", "a
+  school of silver minnows...") — both got a real matched emoji (🦐, 🐟) on the retry.
+  If defaults reappear in a cluster after this, raise it again rather than assuming a
+  prompt-wording problem.
 - **An LLM will follow a JSON example key literally if it looks like a valid value.**
   The system prompt originally had `"glyph": "X"` as a placeholder; the model read it as
   "always answer X" and every creature got the same glyph. Placeholders need to look
@@ -653,3 +830,150 @@ aggressively on canvas draw cost, and it turned out conservative on the ecology 
 instead. Also still unverified: the predator search-radius rescaling's actual effect on
 hunt success rate at this scale, and — the standing limitation through this whole
 session — what any of this looks like on an actual screen.
+
+## Checkpoint 5: LLM-matched emoji + habitat, manual predator spawn, visible size growth, live tick speed, fullscreen
+
+Four things asked together, plus two mid-turn additions (visible size growth, tick
+speed control), plus a fullscreen toggle asked for afterward.
+
+- **Emoji glyph now genuinely matches the prompt.** `CREATURE_COMPILE_SYSTEM_PROMPT`
+  requires a real emoji (`"🦂" for a scorpion`, not a letter). `DEFAULT_CREATURE_PARAMS.glyph`
+  changed from `'C'` to `'🦠'` so even the fallback path fits the theme.
+- **Spawn location is now habitat-biased, not pure random.** The LLM also returns a
+  `habitat` field (`bloom`/`cold`/`vent`/`barren`/`any`), inferred from environmental
+  cues in the prompt text. `pickSpawnPosition()` reservoir-samples a matching-biome
+  cell from `terrain.cells` in one pass.
+- **`spawnPredator` reducer** — manual predator spawn, gated by the same
+  `PREDATOR_MAX_ACTIVE` (2) cap as the automatic ecological trigger.
+- **Size growth bumped for visibility**: `SIZE_GROWTH_PER_MEAL` 0.05→0.15, so a
+  well-fed creature can triple in size (`MAX_SIZE` 3, starting size 1) within a normal
+  session — canvas already sizes the emoji font off `size`, so this alone is enough to
+  make growth read as dramatic on screen, no rendering changes needed.
+- **`setTickSpeed(intervalMicros)`** — updates `tick_schedule.scheduledAt` (the real
+  firing rate) and `world_config.tickIntervalMicros` (a client-readable mirror) in the
+  same call. New `tickIntervalMicros` column on `world_config` (appended at the end,
+  per the column-ordering gotcha above — non-destructive publish on both environments).
+- **Fullscreen toggle** on the canvas — native `requestFullscreen()`/`exitFullscreen()`,
+  a button in the top-right corner, state tracked via the `fullscreenchange` event
+  (covers Esc-to-exit, not just the button). No changes needed to the sizing/camera-fit
+  pipeline — it already measures the container's actual `getBoundingClientRect()`.
+
+**Two real bugs found during verification, not part of what was asked:**
+
+1. `LLM_MAX_TOKENS` at 500 measurably truncated ~13% of live spawns before reaching the
+   newly-added `glyph`/`habitat` fields (see the gotchas section above) — bumped to 800.
+2. `setTickSpeed` silently no-opped the actual reschedule the first time it was
+   published: `tick_schedule.scheduledId` is `autoInc`, so its live row id isn't `0n`
+   the way `world_config`/`terrain`'s fixed-id singleton rows are. `.scheduledId.find(0n)`
+   found nothing, so only the `world_config.tickIntervalMicros` mirror updated while the
+   real tick rate kept running at the old interval — no error anywhere, just a client
+   that silently drifted from the server's actual cadence. Caught by measuring real
+   `tick_count` progression over a wall-clock window instead of trusting the reducer's
+   apparent success. Fixed by looking the row up via `[...ctx.db.tick_schedule.iter()][0]`.
+
+**Verified directly, in order:**
+
+- `npx tsc --noEmit` and `next build` both clean after every change in this round.
+- Habitat inference + placement: spawned `"a fire-breathing salamander that thrives in
+  volcanic heat"` on `local` → response said `"spawned near a thermal vent"`; cross-checked
+  the creature's actual `(x, y)` against `terrain.cells` directly — it landed exactly on
+  a vent-biome cell (biome index 2), not just a plausible-sounding claim in the summary text.
+- Manual predator spawn: `spawn_predator` twice succeeded, a third call correctly
+  rejected with `"Already at the predator cap (2)"`.
+- Emoji matching: seeded 30 varied one-line prompts on both `local` and `maincloud`
+  (30 each). Spot-checked the full `glyph` column on both — real, specific matches
+  throughout (🦋 moth, 🐧 penguin, 🦉 owl, 🦀 crab, 🦎 chameleon, 🦅 falcon, 🐍 snake,
+  🦭 walrus, etc.), not arbitrary letters. Found and fixed the ~13%-truncation issue
+  above as a direct result of this check.
+- Size growth: after the two batches of seeding ran for a while under normal tick
+  progression, several `local` creatures had already reached `MAX_SIZE` (3, from a
+  starting size of 1) — a genuine 3x size range exists to render, confirmed via
+  `spacetime sql`, not just asserted from the constant change.
+- Tick speed: `set_tick_speed 500000` (0.5s) on `local` made `tick_count` advance 10
+  ticks in a measured 5-second window (exactly the expected 2 ticks/sec) — confirmed
+  only *after* finding and fixing bug #2 above; the first attempt looked like it worked
+  (no error) but measurably wasn't changing the real cadence. Reset both environments
+  back to `2000000` (2s) afterward.
+- Fullscreen: implemented and typechecked; **not verified visually** — no browser
+  available this session (see the standing limitation noted throughout this file).
+
+**Population, honestly reported:** seeding 30 fresh creatures (on top of a
+starting-from-zero population on both environments — an unrelated schema-publish cycle
+had brought both down to 0 beforehand) produced real reproduction in the event log, but
+net population still trended down over the following minutes rather than climbing
+toward the 50 cap: 32 → 15 on `local`, 32 → 8 on `maincloud`. Same open tuning question
+as Checkpoint 4 — starvation is outpacing reproduction at the current 350/15
+food config. Not fixed in this round; noted rather than glossed over.
+
+**Seeding commands** (30 random creatures + a predator), for reuse:
+
+```bash
+# Seed ~30 creatures at varied, habitat-biased locations (repeat the call with
+# different one-line prompts covering fire/vent, ice/cold, plant/bloom, desert/barren,
+# and neutral themes for a natural spread across all four biomes):
+spacetime call prompt-wars spawn_from_prompt '"a fire-breathing salamander that thrives in volcanic heat"' --server local
+spacetime call prompt-wars spawn_from_prompt '"a frost wolf that hunts across arctic ice shelves"' --server local
+spacetime call prompt-wars spawn_from_prompt '"a bioluminescent jellyfish drifting through a lush coral bloom"' --server local
+spacetime call prompt-wars spawn_from_prompt '"a cactus spider stalking prey across barren rock"' --server local
+# ...repeat with 26 more one-line prompts, swap --server local for --server maincloud to seed that environment instead
+
+# Spawn a predator manually (world-only mechanic, capped at PREDATOR_MAX_ACTIVE = 2):
+spacetime call prompt-wars spawn_predator --server local
+```
+
+## Checkpoint 6: profile names + a full "how do I ship a value change" checklist
+
+Two asks: (1) a clear, reusable checklist for "I changed a value in
+`spacetimedb/src`, now what" so it doesn't have to be re-derived every session; (2) a
+profile-name feature — the latest name a player adds via the People form should show
+as initials above whichever creature(s) they've spawned.
+
+- **The checklist** is now its own section near the top of this file ("Changing a
+  value in `spacetimedb/src/index.ts` — the full checklist"), covering build → publish
+  local → generate → typecheck/build the client → exercise the change via CLI →
+  publish Maincloud → generate again → what actually needs a dev-server restart vs. a
+  new Vercel deploy for the running UI to pick it up.
+- **Profile names**: `person` gained `owner: t.option(t.identity())` and
+  `createdAt: t.timestamp()` (both appended, both defaulted so the migration was
+  non-destructive — see CLAUDE.md for exactly why each needed `.default(...)`, since a
+  first attempt without it was rejected: *"Adding a column owner to table X requires a
+  default value annotation"*, even for an Option type). `creature` gained the same
+  `owner` column. `add` now stamps `owner: ctx.sender, createdAt: ctx.timestamp` on
+  every insert (still append-only — no upsert, the guestbook itself didn't change).
+  `spawnFromPrompt` stamps the spawning identity onto the new creature; reproduction
+  copies the parent's `owner` onto the child, so a whole lineage stays tagged to
+  whoever originally spawned it; seed/predator creatures keep `owner: undefined`.
+  `app/WorldView.tsx` reduces all subscribed `person` rows to "latest name per
+  identity" (max `createdAt`, grouped by `owner.toHexString()`) and passes a
+  `Map<hexIdentity, initials>` down; `app/WorldCanvas.tsx` looks the label up at
+  *draw time* from a creature's `owner`, not baked into the interpolation entry once,
+  so re-submitting your name relabels your creatures within a frame.
+- **A real bug caught only by `next build`, not `tsc`:** `Identity`/`Timestamp` are
+  class instances. `app/page.tsx` is a Server Component that fetches initial `person`
+  rows server-side and passes them into the client `<PersonList>` — once those rows
+  carried `owner`/`createdAt`, Next's server→client prop serialization broke with
+  *"Only plain objects, and a few built-ins, can be passed to Client Components from
+  Server Components"*, only surfacing during the production build's prerender step.
+  Fixed by narrowing `lib/spacetimedb-server.ts`'s `fetchPeople()` (and its exported
+  `PersonData` type) to `{ name }` only — the SSR path never needed the rest, and the
+  live `useTable` path (entirely client-side, never crossing that boundary) is
+  unaffected. **Lesson applied going forward:** `npx tsc --noEmit` alone is not
+  sufficient verification for a schema change touching anything passed through a
+  Server Component prop — `npm run build` is now step 4 of the checklist above, not
+  optional.
+
+**Verified:**
+
+- `spacetime build`, publish (both environments, non-destructive both times after the
+  `.default(...)` fix), `spacetime:generate`, `npx tsc --noEmit`, and `npm run build`
+  all clean, in that order, on the actual final code.
+- `add "TestUser"` then `add "Zebra"` under the same CLI identity on `local` →
+  `SELECT * FROM person` shows both rows with the same `owner` and increasing
+  `created_at`, confirming "latest wins" has real data to work correctly against.
+- `spawn_from_prompt` on that same identity → the new creature's `owner` column
+  matches the identity that also submitted "Zebra", confirmed via `spacetime sql`.
+- **Not verified visually** — no browser available this session (the standing
+  limitation noted throughout this file). The label-drawing code is typechecked and
+  the underlying data/reduction logic is confirmed correct via the two checks above,
+  but the actual on-canvas rendering (position above the glyph, legibility, whether
+  two nearby players' labels overlap) has not been seen on an actual screen.

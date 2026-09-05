@@ -8,6 +8,10 @@ interface WorldCanvasProps {
   creatures: readonly Creature[];
   food: readonly Food[];
   terrainCells: string | undefined;
+  tickIntervalMs: number;
+  // Keyed by Identity.toHexString() -- the owning identity's latest
+  // person.name, reduced to initials. See app/WorldView.tsx.
+  ownerInitials: ReadonlyMap<string, string>;
 }
 
 // Desaturated, near-black base per biome index (0 bloom, 1 cold, 2 vent,
@@ -60,9 +64,6 @@ interface Camera {
   zoom: number; // screen CSS pixels per world cell
 }
 
-// Matches CLAUDE.md's pinned 2s tick — creature positions lerp over this
-// window instead of teleporting on every tick.
-const TICK_INTERVAL_MS = 2000;
 const MIN_ZOOM_ABS = 2;
 const MAX_ZOOM = 48;
 const FIT_MARGIN = 0.94; // whole-world zoom-out floor sits slightly looser than exact edge-to-edge
@@ -84,7 +85,9 @@ interface InterpEntry {
   changedAt: number;
   size: number;
   color: string;
+  glyph: string;
   isPredator: boolean;
+  ownerKey: string | undefined;
 }
 
 // World-spawned, never player-authored -- deliberately reads as a threat
@@ -99,7 +102,7 @@ function isTypingTarget(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true;
 }
 
-export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCanvasProps) {
+export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickIntervalMs, ownerInitials }: WorldCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -107,6 +110,12 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
   // (and pointer/keyboard handlers) always read the latest value without
   // being recreated every time it changes.
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 8 });
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onFullscreenChange = () => setIsFullscreen(document.fullscreenElement === containerRef.current);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
 
@@ -114,6 +123,10 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
   gridSizeRef.current = gridSize;
   const foodRef = useRef(food);
   foodRef.current = food;
+  const tickIntervalMsRef = useRef(tickIntervalMs);
+  tickIntervalMsRef.current = tickIntervalMs;
+  const ownerInitialsRef = useRef(ownerInitials);
+  ownerInitialsRef.current = ownerInitials;
   const terrainCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Terrain never changes after generation, so this texture is built once
@@ -234,22 +247,26 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
       const key = c.id.toString();
       seen.add(key);
       const existing = map.get(key);
+      const ownerKey = c.owner ? c.owner.toHexString() : undefined;
       if (!existing) {
         map.set(key, {
           prevX: c.x, prevY: c.y, currX: c.x, currY: c.y,
-          changedAt: now, size: c.size, color: c.color, isPredator: c.isPredator,
+          changedAt: now, size: c.size, color: c.color, glyph: c.glyph, isPredator: c.isPredator, ownerKey,
         });
       } else if (existing.currX !== c.x || existing.currY !== c.y) {
         map.set(key, {
           prevX: existing.currX, prevY: existing.currY, currX: c.x, currY: c.y,
-          changedAt: now, size: c.size, color: c.color, isPredator: c.isPredator,
+          changedAt: now, size: c.size, color: c.color, glyph: c.glyph, isPredator: c.isPredator, ownerKey,
         });
       } else {
         // Position unchanged (e.g. only energy/size changed this tick) --
-        // refresh cosmetic fields without resetting the lerp in progress.
+        // refresh cosmetic fields (including size, so growth from a meal is
+        // visible immediately) without resetting the lerp in progress.
         existing.size = c.size;
         existing.color = c.color;
+        existing.glyph = c.glyph;
         existing.isPredator = c.isPredator;
+        existing.ownerKey = ownerKey;
       }
     }
     for (const key of [...map.keys()]) {
@@ -323,7 +340,7 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
     // purpose -- sharp diamond, fixed red/white, no soft glow -- so a
     // first-time viewer reads "that one is dangerous" with no legend.
     for (const entry of interpRef.current.values()) {
-      const t = Math.min(1, (now - entry.changedAt) / TICK_INTERVAL_MS);
+      const t = Math.min(1, (now - entry.changedAt) / tickIntervalMsRef.current);
       const wx = entry.prevX + (entry.currX - entry.prevX) * t + 0.5;
       const wy = entry.prevY + (entry.currY - entry.prevY) * t + 0.5;
       const p = worldToScreen(wx, wy);
@@ -355,13 +372,29 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
       ctx.arc(p.x, p.y, radius * 1.8, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.fillStyle = entry.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-      ctx.lineWidth = Math.max(1, radius * 0.18);
-      ctx.stroke();
+      // The LLM-assigned emoji, not a flat circle -- sized directly off
+      // `radius` (which is already size*zoom), so a creature growing from
+      // meals is a *visibly bigger emoji* on screen, not just a bigger
+      // number in the table. Font size, not a scale transform, so glyphs
+      // stay crisp at any zoom instead of blurring.
+      ctx.font = `${radius * 2}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(entry.glyph, p.x, p.y);
+
+      // Profile-name feature: whoever spawned this creature gets their
+      // initials (first 2 letters of their latest `person.name`) pinned
+      // above it -- lets a player spot their own creatures at a glance.
+      // Undefined for seed/predator creatures and for owners who never
+      // added a name, so most of the world stays label-free.
+      const label = entry.ownerKey ? ownerInitialsRef.current.get(entry.ownerKey) : undefined;
+      if (label) {
+        ctx.font = `${Math.max(9, radius * 0.7)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(label, p.x, p.y - radius - 2);
+      }
     }
   }, []);
 
@@ -492,17 +525,27 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
     if (pointersRef.current.size < 2) pinchRef.current = null;
   };
 
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void containerRef.current?.requestFullscreen();
+    }
+  };
+
   return (
     <div
       ref={containerRef}
       style={{
         width: '100%',
-        aspectRatio: '1',
-        maxHeight: '75vh',
+        aspectRatio: isFullscreen ? undefined : '1',
+        height: isFullscreen ? '100%' : undefined,
+        maxHeight: isFullscreen ? undefined : '75vh',
         background: VOID_COLOR,
-        borderRadius: 8,
+        borderRadius: isFullscreen ? 0 : 8,
         overflow: 'hidden',
         touchAction: 'none',
+        position: 'relative',
       }}
     >
       <canvas
@@ -515,6 +558,26 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells }: WorldCa
         onPointerCancel={endPointer}
         onPointerLeave={endPointer}
       />
+      <button
+        onClick={toggleFullscreen}
+        aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        style={{
+          position: 'absolute',
+          top: 8,
+          right: 8,
+          width: 36,
+          height: 36,
+          borderRadius: 6,
+          border: 'none',
+          background: 'rgba(5, 7, 12, 0.6)',
+          color: '#9dffcf',
+          fontSize: 18,
+          lineHeight: 1,
+          cursor: 'pointer',
+        }}
+      >
+        {isFullscreen ? '⤡' : '⤢'}
+      </button>
     </div>
   );
 }

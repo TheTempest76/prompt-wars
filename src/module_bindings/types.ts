@@ -24,6 +24,7 @@ export const Creature = __t.object("Creature", {
   prompt: __t.string(),
   isPredator: __t.bool(),
   kills: __t.u32(),
+  owner: __t.option(__t.identity()),
 });
 export type Creature = __Infer<typeof Creature>;
 
@@ -51,6 +52,8 @@ export type LlmSecret = __Infer<typeof LlmSecret>;
 
 export const Person = __t.object("Person", {
   name: __t.string(),
+  owner: __t.option(__t.identity()),
+  createdAt: __t.timestamp(),
 });
 export type Person = __Infer<typeof Person>;
 
@@ -89,6 +92,7 @@ export const WorldConfig = __t.object("WorldConfig", {
   barrenFoodMult: __t.f32(),
   barrenBurnMult: __t.f32(),
   foodSpawnPerTick: __t.u32(),
+  tickIntervalMicros: __t.u64(),
 });
 export type WorldConfig = __Infer<typeof WorldConfig>;
 
