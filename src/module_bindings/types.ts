@@ -10,6 +10,15 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const Creature = __t.object("Creature", {
+  id: __t.u64(),
+  x: __t.u32(),
+  y: __t.u32(),
+  energy: __t.f32(),
+  size: __t.f32(),
+});
+export type Creature = __Infer<typeof Creature>;
+
 export const EventLog = __t.object("EventLog", {
   id: __t.u64(),
   tickNumber: __t.u64(),
@@ -17,6 +26,13 @@ export const EventLog = __t.object("EventLog", {
   at: __t.timestamp(),
 });
 export type EventLog = __Infer<typeof EventLog>;
+
+export const Food = __t.object("Food", {
+  id: __t.u64(),
+  x: __t.u32(),
+  y: __t.u32(),
+});
+export type Food = __Infer<typeof Food>;
 
 export const Person = __t.object("Person", {
   name: __t.string(),
@@ -29,10 +45,14 @@ export const TickSchedule = __t.object("TickSchedule", {
 });
 export type TickSchedule = __Infer<typeof TickSchedule>;
 
-export const WorldTick = __t.object("WorldTick", {
+export const WorldConfig = __t.object("WorldConfig", {
   id: __t.u64(),
-  count: __t.u64(),
+  gridSize: __t.u32(),
+  populationCap: __t.u32(),
+  foodCap: __t.u32(),
+  rngSeed: __t.u64(),
+  tickCount: __t.u64(),
   lastTickAt: __t.timestamp(),
 });
-export type WorldTick = __Infer<typeof WorldTick>;
+export type WorldConfig = __Infer<typeof WorldConfig>;
 

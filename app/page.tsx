@@ -1,5 +1,5 @@
 import { PersonList } from './PersonList';
-import { WorldTick } from './WorldTick';
+import { WorldView } from './WorldView';
 import { fetchPeople } from '../lib/spacetimedb-server';
 
 export default async function Home() {
@@ -18,7 +18,7 @@ export default async function Home() {
     <main style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>
       <h1>SpacetimeDB Next.js App</h1>
       <PersonList initialPeople={initialPeople} />
-      <WorldTick />
+      <WorldView />
     </main>
   );
 }

@@ -10,8 +10,6 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  id: __t.u64().primaryKey(),
-  count: __t.u64(),
-  lastTickAt: __t.timestamp().name("last_tick_at"),
-});
+export default {
+  cap: __t.u32(),
+};

@@ -8,7 +8,9 @@ import { type Infer as __Infer } from "spacetimedb";
 // Import all reducer arg schemas
 import AddReducer from "../add_reducer";
 import SayHelloReducer from "../say_hello_reducer";
+import SetPopulationCapReducer from "../set_population_cap_reducer";
 
 export type AddParams = __Infer<typeof AddReducer>;
 export type SayHelloParams = __Infer<typeof SayHelloReducer>;
+export type SetPopulationCapParams = __Infer<typeof SetPopulationCapReducer>;
 

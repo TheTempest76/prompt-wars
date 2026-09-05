@@ -36,18 +36,32 @@ import {
 // Import all reducer arg schemas
 import AddReducer from "./add_reducer";
 import SayHelloReducer from "./say_hello_reducer";
+import SetPopulationCapReducer from "./set_population_cap_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
+import CreatureRow from "./creature_table";
 import EventLogRow from "./event_log_table";
+import FoodRow from "./food_table";
 import PersonRow from "./person_table";
-import WorldTickRow from "./world_tick_table";
+import WorldConfigRow from "./world_config_table";
 
 /** Type-only namespace exports for generated type groups. */
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
+  creature: __table({
+    name: 'creature',
+    indexes: [
+      { accessor: 'id', name: 'creature_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'creature_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, CreatureRow),
   eventLog: __table({
     name: 'event_log',
     indexes: [
@@ -59,6 +73,17 @@ const tablesSchema = __schema({
       { name: 'event_log_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, EventLogRow),
+  food: __table({
+    name: 'food',
+    indexes: [
+      { accessor: 'id', name: 'food_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'food_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, FoodRow),
   person: __table({
     name: 'person',
     indexes: [
@@ -66,23 +91,24 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, PersonRow),
-  worldTick: __table({
-    name: 'world_tick',
+  worldConfig: __table({
+    name: 'world_config',
     indexes: [
-      { accessor: 'id', name: 'world_tick_id_idx_btree', algorithm: 'btree', columns: [
+      { accessor: 'id', name: 'world_config_id_idx_btree', algorithm: 'btree', columns: [
         'id',
       ] },
     ],
     constraints: [
-      { name: 'world_tick_id_key', constraint: 'unique', columns: ['id'] },
+      { name: 'world_config_id_key', constraint: 'unique', columns: ['id'] },
     ],
-  }, WorldTickRow),
+  }, WorldConfigRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("add", AddReducer),
   __reducerSchema("say_hello", SayHelloReducer),
+  __reducerSchema("set_population_cap", SetPopulationCapReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */
@@ -93,8 +119,8 @@ type __SchemaWithTableAccessorAliases = Omit<typeof tablesSchema.schemaType, "ta
   tables: typeof tablesSchema.schemaType.tables & {
     /** @deprecated Use `eventLog` instead. This alias will be removed in the next major version. */
     readonly "event_log": Omit<typeof tablesSchema.schemaType.tables["eventLog"], "accessorName"> & { readonly accessorName: "event_log" };
-    /** @deprecated Use `worldTick` instead. This alias will be removed in the next major version. */
-    readonly "world_tick": Omit<typeof tablesSchema.schemaType.tables["worldTick"], "accessorName"> & { readonly accessorName: "world_tick" };
+    /** @deprecated Use `worldConfig` instead. This alias will be removed in the next major version. */
+    readonly "world_config": Omit<typeof tablesSchema.schemaType.tables["worldConfig"], "accessorName"> & { readonly accessorName: "world_config" };
   };
 };
 
@@ -114,7 +140,7 @@ const REMOTE_MODULE = {
 
 const tableAccessorAliases = {
   "event_log": "eventLog",
-  "world_tick": "worldTick",
+  "world_config": "worldConfig",
 } as const;
 
 function __withTableAccessorAliases<T extends object>(target: T, freeze = false): T {
@@ -137,16 +163,16 @@ type __DbViewBase = __DbConnectionImpl<typeof REMOTE_MODULE>["db"];
 export type DbView = __DbViewBase & {
   /** @deprecated Use `eventLog` instead. This alias will be removed in the next major version. */
   readonly "event_log": __DbViewBase["eventLog"];
-  /** @deprecated Use `worldTick` instead. This alias will be removed in the next major version. */
-  readonly "world_tick": __DbViewBase["worldTick"];
+  /** @deprecated Use `worldConfig` instead. This alias will be removed in the next major version. */
+  readonly "world_config": __DbViewBase["worldConfig"];
 };
 
 type __TablesBase = __QueryBuilder<typeof tablesSchema.schemaType>;
 export type Tables = __TablesBase & {
   /** @deprecated Use `eventLog` instead. This alias will be removed in the next major version. */
   readonly "event_log": __TablesBase["eventLog"];
-  /** @deprecated Use `worldTick` instead. This alias will be removed in the next major version. */
-  readonly "world_tick": __TablesBase["worldTick"];
+  /** @deprecated Use `worldConfig` instead. This alias will be removed in the next major version. */
+  readonly "world_config": __TablesBase["worldConfig"];
 };
 
 /** The tables available in this remote SpacetimeDB module. Each table reference doubles as a query builder. */
