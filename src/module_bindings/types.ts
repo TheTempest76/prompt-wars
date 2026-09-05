@@ -16,6 +16,12 @@ export const Creature = __t.object("Creature", {
   y: __t.u32(),
   energy: __t.f32(),
   size: __t.f32(),
+  glyph: __t.string(),
+  color: __t.string(),
+  seeksFood: __t.bool(),
+  fleesLarger: __t.bool(),
+  aggression: __t.u8(),
+  prompt: __t.string(),
 });
 export type Creature = __Infer<typeof Creature>;
 
@@ -34,10 +40,23 @@ export const Food = __t.object("Food", {
 });
 export type Food = __Infer<typeof Food>;
 
+export const LlmSecret = __t.object("LlmSecret", {
+  id: __t.u64(),
+  owner: __t.identity(),
+  apiKey: __t.string(),
+});
+export type LlmSecret = __Infer<typeof LlmSecret>;
+
 export const Person = __t.object("Person", {
   name: __t.string(),
 });
 export type Person = __Infer<typeof Person>;
+
+export const SpawnResult = __t.object("SpawnResult", {
+  creatureId: __t.option(__t.u64()),
+  summary: __t.string(),
+});
+export type SpawnResult = __Infer<typeof SpawnResult>;
 
 export const TickSchedule = __t.object("TickSchedule", {
   scheduledId: __t.u64(),

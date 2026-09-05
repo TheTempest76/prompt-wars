@@ -10,16 +10,6 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  id: __t.u64().primaryKey(),
-  x: __t.u32(),
-  y: __t.u32(),
-  energy: __t.f32(),
-  size: __t.f32(),
-  glyph: __t.string(),
-  color: __t.string(),
-  seeksFood: __t.bool().name("seeks_food"),
-  fleesLarger: __t.bool().name("flees_larger"),
-  aggression: __t.u8(),
-  prompt: __t.string(),
-});
+export default {
+  apiKey: __t.string(),
+};

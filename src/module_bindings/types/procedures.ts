@@ -6,5 +6,8 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all procedure arg schemas
+import * as SpawnFromPromptProcedure from "../spawn_from_prompt_procedure";
 
+export type SpawnFromPromptArgs = __Infer<typeof SpawnFromPromptProcedure.params>;
+export type SpawnFromPromptResult = __Infer<typeof SpawnFromPromptProcedure.returnType>;
 

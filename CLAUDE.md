@@ -24,9 +24,12 @@ aren't re-derived or re-argued every session.
   after the fact — it's seeded from `ctx.timestamp`, not from table state. Store an
   explicit `rngSeed: t.u64()` column on `world_config` and advance it yourself each
   tick, so tick N's outcome is derivable from tick N's row data alone.
-- **LLM secret (Checkpoint 4):** a private table holding the API key, written once by
-  an owner-only reducer (`ctx.sender` checked against a hardcoded owner identity or a
-  `setLlmKey` reducer gated the same way). Never accept the key as a client-supplied
+- **LLM provider: Grok (xAI), not Claude/OpenAI.** `GROK_MODEL` in
+  `spacetimedb/src/index.ts` names the exact model id — verify it against
+  https://docs.x.ai/docs/models before relying on it, xAI renames/retires ids often.
+- **LLM secret:** a private `llm_secret` table, written by `setLlmKey` — the *first*
+  identity ever to call it becomes the permanent owner (checked via `ctx.sender.equals`),
+  and only that identity can rotate it later. Never accept the key as a client-supplied
   argument — procedure arguments come from the browser and are public.
 - **No auth, no accounts.** Anonymous identity only. A stranger must be usable within
   30 seconds of opening the URL. Don't add login, OIDC, or a token exchange flow.
@@ -252,27 +255,38 @@ const Behavior = t.enum('Behavior', {
 // Values: { tag: 'seekFood' } / { tag: 'fleeLarger', value: { threshold: 1.5 } }
 ```
 
-### Procedures and outbound HTTP (Checkpoint 4 only)
+### Procedures and outbound HTTP
+
+The real shape, from `spawnFromPrompt` in `spacetimedb/src/index.ts` (Grok's API is
+OpenAI-compatible chat completions — `POST /v1/chat/completions`, `Authorization:
+Bearer <key>`, response at `choices[0].message.content`):
 
 ```typescript
 export const spawnFromPrompt = spacetimedb.procedure(
   { prompt: t.string() },
-  t.unit(),
+  SpawnResult,                                    // t.object with a real return value
   (ctx, { prompt }) => {
-    const key = ctx.withTx(tx => tx.db.llm_secret.iter().next().value?.apiKey);
     let params = DEFAULT_CREATURE_PARAMS;
-    try {
-      const res = ctx.http.fetch('https://api.openai.com/v1/...', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ prompt }),
-        timeout: TimeDuration.fromMillis(2500),   // short — never block spawn on a slow API
-      });
-      if (res.status === 200) params = validateAndClamp(JSON.parse(res.text()));
-    } catch {
-      // fall through to DEFAULT_CREATURE_PARAMS — the game must never be blocked on an API
+    const secret = ctx.withTx(tx => tx.db.llm_secret.id.find(0n));
+    if (secret) {
+      try {
+        const res = ctx.http.fetch(GROK_API_URL, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${secret.apiKey}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: GROK_MODEL, messages: [...] }),
+          timeout: TimeDuration.fromMillis(LLM_TIMEOUT_MILLIS), // short — never block spawn on a slow API
+        });
+        if (res.status === 200) {
+          const content = JSON.parse(res.text())?.choices?.[0]?.message?.content;
+          if (typeof content === 'string') params = clampCreatureParams(JSON.parse(content));
+        }
+      } catch {
+        // network error, timeout, bad JSON — fall through to DEFAULT_CREATURE_PARAMS.
+        // The game must never be blocked on an external API.
+      }
     }
-    ctx.withTx(tx => { tx.db.creature.insert({ ...params, owner: ctx.sender }); });
+    const child = ctx.withTx(tx => tx.db.creature.insert({ ...params, /* ... */ }));
+    return { creatureId: child?.id, summary: describeCreatureParams(params) };
   }
 );
 ```
@@ -281,6 +295,9 @@ Procedures are **synchronous** — `ctx.http.fetch` blocks and returns directly,
 `await`. Always set an explicit `timeout`. Do network I/O *outside* `ctx.withTx`;
 procedures can't hold a transaction open while a request is in flight. `t.array(t.u8())`
 values are `number[]` — wrap in `new Uint8Array(value)` before treating as binary.
+Every field of the parsed response is validated and defaulted independently
+(`clampCreatureParams`) — a partially-garbage response still yields a valid creature,
+never a blocked spawn.
 
 Never accept the API key as a procedure argument (it would come from the browser,
 public by definition) — read it from the private `llm_secret` table instead.

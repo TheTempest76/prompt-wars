@@ -1,9 +1,17 @@
-import { schema, table, t } from 'spacetimedb/server';
-import { ScheduleAt } from 'spacetimedb';
+import { schema, table, t, SenderError } from 'spacetimedb/server';
+import { ScheduleAt, TimeDuration } from 'spacetimedb';
 
 // See CLAUDE.md "This project's decisions".
 const TICK_INTERVAL_MICROS = 2_000_000n; // 2 seconds
 const EVENT_LOG_MAX_ROWS = 50;
+
+// xAI's Grok API, OpenAI-compatible chat completions shape.
+// Verify GROK_MODEL against https://docs.x.ai/docs/models before relying on
+// it — xAI renames/retires model ids faster than most providers.
+const GROK_API_URL = 'https://api.x.ai/v1/chat/completions';
+const GROK_MODEL = 'grok-4';
+const LLM_TIMEOUT_MILLIS = 4000;
+const MAX_PROMPT_LENGTH = 200;
 
 const GRID_SIZE = 20;
 const DEFAULT_POPULATION_CAP = 20;
@@ -24,6 +32,10 @@ const REPRODUCE_ENERGY_THRESHOLD = 80;
 const REPRODUCE_ENERGY_COST = 40;
 const CHILD_STARTING_ENERGY = 40;
 const MUTATION_RANGE = 0.15; // child size = parent size * (1 +/- this), max swing
+
+const FLEE_RADIUS = 4; // cells — how far a fleesLarger creature scans for a threat
+const FLEE_SIZE_MARGIN = 1.2; // a creature counts as "larger" above this multiple
+const AGGRESSION_ENERGY_SCALE = 0.05; // per aggression point: burn/gain more, both ways
 
 const U64_MASK = (1n << 64n) - 1n;
 
@@ -61,6 +73,74 @@ function manhattan(ax: number, ay: number, bx: number, by: number): number {
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
+
+// The fixed shape Grok compiles a one-line prompt into. Small and flat on
+// purpose — every field must be independently validated and clamped before
+// it touches a table, so keeping the set small keeps that review honest.
+type CreatureParams = {
+  seeksFood: boolean;
+  fleesLarger: boolean;
+  aggression: number; // integer 0-10
+  glyph: string; // exactly one character/emoji
+  color: string; // '#rrggbb'
+};
+
+const DEFAULT_CREATURE_PARAMS: CreatureParams = {
+  seeksFood: true,
+  fleesLarger: false,
+  aggression: 5,
+  glyph: 'C',
+  color: '#8888ff',
+};
+
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+// Never trust what an LLM hands back. Every field falls back to
+// DEFAULT_CREATURE_PARAMS independently if it's missing, the wrong type, or
+// out of range — a partially-garbage response still yields a valid creature.
+function clampCreatureParams(raw: unknown): CreatureParams {
+  const r = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+
+  const seeksFood = typeof r.seeksFood === 'boolean' ? r.seeksFood : DEFAULT_CREATURE_PARAMS.seeksFood;
+  const fleesLarger = typeof r.fleesLarger === 'boolean' ? r.fleesLarger : DEFAULT_CREATURE_PARAMS.fleesLarger;
+  const aggression =
+    typeof r.aggression === 'number' && Number.isFinite(r.aggression)
+      ? clamp(Math.round(r.aggression), 0, 10)
+      : DEFAULT_CREATURE_PARAMS.aggression;
+
+  const glyphSource = typeof r.glyph === 'string' ? [...r.glyph][0] : undefined;
+  const glyph = glyphSource && glyphSource.length > 0 ? glyphSource : DEFAULT_CREATURE_PARAMS.glyph;
+
+  const colorSource = typeof r.color === 'string' ? r.color : '';
+  const color = HEX_COLOR_RE.test(colorSource) ? colorSource : DEFAULT_CREATURE_PARAMS.color;
+
+  return { seeksFood, fleesLarger, aggression, glyph, color };
+}
+
+// Grok is asked for pure JSON but sometimes wraps it in a markdown fence
+// anyway — strip that defensively before JSON.parse rather than failing.
+function stripJsonFences(text: string): string {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+  return fenced ? fenced[1] : trimmed;
+}
+
+function describeCreatureParams(params: CreatureParams): string {
+  const parts = [params.seeksFood ? 'seeks food' : 'wanders randomly'];
+  if (params.fleesLarger) parts.push('flees larger creatures');
+  parts.push(`aggression ${params.aggression}/10`);
+  return parts.join(', ') + '.';
+}
+
+const CREATURE_COMPILE_SYSTEM_PROMPT = `You compile a one-sentence creature description into fixed-shape JSON game parameters for a small ecosystem simulation.
+Output ONLY a single JSON object, no prose, no markdown fences, matching exactly this shape:
+{
+  "seeksFood": boolean,       // does it actively hunt for food, or just wander?
+  "fleesLarger": boolean,     // does it flee from creatures bigger than itself?
+  "aggression": integer 0-10, // 0 = passive, 10 = very aggressive
+  "glyph": "X",               // one character or emoji representing it visually
+  "color": "#rrggbb"          // hex color string
+}`;
 
 const person = table(
   { public: true },
@@ -103,6 +183,24 @@ const creature = table(
     y: t.u32(),
     energy: t.f32(),
     size: t.f32(),
+    glyph: t.string(),
+    color: t.string(),
+    seeksFood: t.bool(),
+    fleesLarger: t.bool(),
+    aggression: t.u8(),
+    prompt: t.string(), // the original one-line description, for explainability
+  }
+);
+
+// Private — the API key never touches a client. Write-once-per-owner: the
+// first identity to call setLlmKey becomes the owner and can rotate it
+// later; nobody else can overwrite it. See CLAUDE.md's LLM-secret decision.
+const llm_secret = table(
+  {},
+  {
+    id: t.u64().primaryKey(),
+    owner: t.identity(),
+    apiKey: t.string(),
   }
 );
 
@@ -132,6 +230,7 @@ const spacetimedb = schema({
   creature,
   food,
   event_log,
+  llm_secret,
 });
 export default spacetimedb;
 
@@ -145,6 +244,8 @@ export const init = spacetimedb.init(ctx => {
       y: rng.int(GRID_SIZE),
       energy: 50,
       size: 1,
+      ...DEFAULT_CREATURE_PARAMS,
+      prompt: '(seed creature)',
     });
   }
   for (let i = 0; i < INITIAL_FOOD_COUNT; i++) {
@@ -220,24 +321,48 @@ export const tick = spacetimedb.reducer(
     const logs: string[] = [];
 
     for (const current of creatures) {
-      // 1. Find the nearest food. Bounded by populationCap * foodCap per
-      // tick (both hard-capped), not a spatial index — fine at 40x40 scale,
-      // would need one before raising the caps much further.
-      let target: { x: number; y: number } | undefined;
-      let bestDist = Infinity;
-      for (const f of foodByCell.values()) {
-        const d = manhattan(current.x, current.y, f.x, f.y);
-        if (d < bestDist) {
-          bestDist = d;
-          target = f;
+      // 1. fleesLarger creatures scan for a nearby bigger threat first —
+      // fleeing overrides feeding this tick. Otherwise seekers find the
+      // nearest food. Both bounded by populationCap/foodCap (hard-capped),
+      // not a spatial index — fine at this grid size, would need one before
+      // raising the caps much further.
+      let fleeFrom: { x: number; y: number } | undefined;
+      if (current.fleesLarger) {
+        let bestThreatDist = Infinity;
+        for (const other of creatures) {
+          if (other.id === current.id) continue;
+          if (other.size <= current.size * FLEE_SIZE_MARGIN) continue;
+          const d = manhattan(current.x, current.y, other.x, other.y);
+          if (d <= FLEE_RADIUS && d < bestThreatDist) {
+            bestThreatDist = d;
+            fleeFrom = other;
+          }
         }
       }
 
-      // 2. Move one cell toward it (greedy, no pathfinding). Random step if
-      // there's nothing to seek, so creatures don't just freeze.
+      let target: { x: number; y: number } | undefined;
+      if (!fleeFrom && current.seeksFood) {
+        let bestDist = Infinity;
+        for (const f of foodByCell.values()) {
+          const d = manhattan(current.x, current.y, f.x, f.y);
+          if (d < bestDist) {
+            bestDist = d;
+            target = f;
+          }
+        }
+      }
+
+      // 2. Move one cell toward the food target, away from a threat, or a
+      // random step if neither applies (greedy either way, no pathfinding).
       let x = current.x;
       let y = current.y;
-      if (target) {
+      if (fleeFrom) {
+        const dx = x - fleeFrom.x;
+        const dy = y - fleeFrom.y;
+        if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) x += Math.sign(dx);
+        else if (dy !== 0) y += Math.sign(dy);
+        else x += rng.int(2) === 0 ? 1 : -1; // directly on top of the threat
+      } else if (target) {
         const dx = target.x - x;
         const dy = target.y - y;
         if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) x += Math.sign(dx);
@@ -253,13 +378,15 @@ export const tick = spacetimedb.reducer(
       y = clamp(y, 0, state.gridSize - 1);
 
       // 3. Eat if standing on food; otherwise burn energy, and shrink if
-      // starving.
-      let energy = current.energy - ENERGY_BURN_PER_TICK;
+      // starving. Aggression trades burn rate for gain rate either way —
+      // no free lunch for a "voracious" creature.
+      const aggressionScale = 1 + current.aggression * AGGRESSION_ENERGY_SCALE;
+      let energy = current.energy - ENERGY_BURN_PER_TICK * aggressionScale;
       let size = current.size;
       const cellKey = `${x},${y}`;
       const eaten = foodByCell.get(cellKey);
       if (eaten) {
-        energy = Math.min(MAX_ENERGY, energy + ENERGY_FROM_FOOD);
+        energy = Math.min(MAX_ENERGY, energy + ENERGY_FROM_FOOD * aggressionScale);
         size = Math.min(MAX_SIZE, size + SIZE_GROWTH_PER_MEAL);
         ctx.db.food.id.delete(eaten.id);
         foodByCell.delete(cellKey);
@@ -282,12 +409,22 @@ export const tick = spacetimedb.reducer(
         energy -= REPRODUCE_ENERGY_COST;
         const mutation = 1 + (rng.next() * 2 - 1) * MUTATION_RANGE;
         const childSize = clamp(size * mutation, MIN_SIZE, MAX_SIZE);
+        // Behavior params (glyph/color/seeksFood/fleesLarger/aggression)
+        // are inherited unchanged — only size mutates on reproduction.
+        // Deliberate scope choice: evolving behavior genetics further is
+        // outside what this checkpoint asked for.
         const child = ctx.db.creature.insert({
           id: 0n,
           x,
           y,
           energy: CHILD_STARTING_ENERGY,
           size: childSize,
+          glyph: current.glyph,
+          color: current.color,
+          seeksFood: current.seeksFood,
+          fleesLarger: current.fleesLarger,
+          aggression: current.aggression,
+          prompt: current.prompt,
         });
         population++;
         logs.push(
@@ -332,5 +469,108 @@ export const tick = spacetimedb.reducer(
       tickCount: tickNumber,
       lastTickAt: ctx.timestamp,
     });
+  }
+);
+
+// Set (or, called again by the same owner, rotate) the Grok API key. The
+// first identity ever to call this becomes the permanent owner — call it
+// yourself right after your first publish, before sharing the URL, so a
+// stranger can't claim it first. Rotate an existing key by deleting the row
+// via `spacetime sql` and calling this again, or by calling it again as the
+// same owner identity.
+export const setLlmKey = spacetimedb.reducer(
+  { apiKey: t.string() },
+  (ctx, { apiKey }) => {
+    const existing = ctx.db.llm_secret.id.find(0n);
+    if (existing) {
+      if (!existing.owner.equals(ctx.sender)) {
+        throw new SenderError('LLM key already set by a different identity.');
+      }
+      ctx.db.llm_secret.id.update({ ...existing, apiKey });
+    } else {
+      ctx.db.llm_secret.insert({ id: 0n, owner: ctx.sender, apiKey });
+    }
+  }
+);
+
+const SpawnResult = t.object('SpawnResult', {
+  creatureId: t.option(t.u64()),
+  summary: t.string(),
+});
+
+// The only place in this module allowed to make an outbound HTTP call — see
+// CLAUDE.md "Procedures and outbound HTTP". Runs once at spawn, never per
+// tick. If Grok isn't configured, times out, or returns garbage, params
+// silently fall back to DEFAULT_CREATURE_PARAMS and the creature still
+// spawns — the game must never be blocked on an external API.
+export const spawnFromPrompt = spacetimedb.procedure(
+  { prompt: t.string() },
+  SpawnResult,
+  (ctx, { prompt }) => {
+    const trimmedPrompt = prompt.trim().slice(0, MAX_PROMPT_LENGTH);
+    let params = DEFAULT_CREATURE_PARAMS;
+
+    const secret = ctx.withTx(tx => tx.db.llm_secret.id.find(0n));
+    if (secret && trimmedPrompt.length > 0) {
+      try {
+        const res = ctx.http.fetch(GROK_API_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${secret.apiKey}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: GROK_MODEL,
+            max_tokens: 300,
+            messages: [
+              { role: 'system', content: CREATURE_COMPILE_SYSTEM_PROMPT },
+              { role: 'user', content: trimmedPrompt },
+            ],
+          }),
+          timeout: TimeDuration.fromMillis(LLM_TIMEOUT_MILLIS),
+        });
+        if (res.status === 200) {
+          const body = JSON.parse(res.text());
+          const content = body?.choices?.[0]?.message?.content;
+          if (typeof content === 'string') {
+            params = clampCreatureParams(JSON.parse(stripJsonFences(content)));
+          }
+        }
+      } catch {
+        // Network error, timeout, or malformed JSON. Fall through to
+        // DEFAULT_CREATURE_PARAMS — never block the spawn on this.
+      }
+    }
+
+    const child = ctx.withTx(tx => {
+      const state = tx.db.world_config.id.find(0n);
+      if (!state) return undefined;
+      if ([...tx.db.creature.iter()].length >= state.populationCap) return undefined;
+
+      const rng = makeRng(state.rngSeed);
+      const row = tx.db.creature.insert({
+        id: 0n,
+        x: rng.int(state.gridSize),
+        y: rng.int(state.gridSize),
+        energy: CHILD_STARTING_ENERGY,
+        size: 1,
+        glyph: params.glyph,
+        color: params.color,
+        seeksFood: params.seeksFood,
+        fleesLarger: params.fleesLarger,
+        aggression: params.aggression,
+        prompt: trimmedPrompt,
+      });
+      tx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
+      return row;
+    });
+
+    if (!child) {
+      return {
+        creatureId: undefined,
+        summary: 'The world is full right now — try again once something dies.',
+      };
+    }
+    return { creatureId: child.id, summary: describeCreatureParams(params) };
   }
 );

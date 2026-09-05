@@ -36,9 +36,11 @@ import {
 // Import all reducer arg schemas
 import AddReducer from "./add_reducer";
 import SayHelloReducer from "./say_hello_reducer";
+import SetLlmKeyReducer from "./set_llm_key_reducer";
 import SetPopulationCapReducer from "./set_population_cap_reducer";
 
 // Import all procedure arg schemas
+import * as SpawnFromPromptProcedure from "./spawn_from_prompt_procedure";
 
 // Import all table schema definitions
 import CreatureRow from "./creature_table";
@@ -108,11 +110,13 @@ const tablesSchema = __schema({
 const reducersSchema = __reducers(
   __reducerSchema("add", AddReducer),
   __reducerSchema("say_hello", SayHelloReducer),
+  __reducerSchema("set_llm_key", SetLlmKeyReducer),
   __reducerSchema("set_population_cap", SetPopulationCapReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */
 const proceduresSchema = __procedures(
+  __procedureSchema("spawn_from_prompt", SpawnFromPromptProcedure.params, SpawnFromPromptProcedure.returnType),
 );
 
 type __SchemaWithTableAccessorAliases = Omit<typeof tablesSchema.schemaType, "tables"> & {

@@ -19,9 +19,12 @@ export function WorldView() {
   const gridSize = config ? Number(config.gridSize) : 0;
 
   // Creatures drawn over food if they share a cell.
-  const occupied = new Map<string, 'creature' | 'food'>();
-  for (const f of foodRows) occupied.set(`${f.x},${f.y}`, 'food');
-  for (const c of creatures) occupied.set(`${c.x},${c.y}`, 'creature');
+  type Cell = { char: string; color?: string };
+  const occupied = new Map<string, Cell>();
+  for (const f of foodRows) occupied.set(`${f.x},${f.y}`, { char: '.' });
+  for (const c of creatures) {
+    occupied.set(`${c.x},${c.y}`, { char: c.glyph || 'C', color: c.color });
+  }
 
   const recentEvents = [...events]
     .sort((a, b) =>
@@ -42,12 +45,18 @@ export function WorldView() {
 
       {gridSize > 0 && (
         <pre style={{ lineHeight: 1, fontSize: '0.9rem' }}>
-          {Array.from({ length: gridSize }, (_, y) =>
-            Array.from({ length: gridSize }, (_, x) => {
-              const cell = occupied.get(`${x},${y}`);
-              return cell === 'creature' ? 'C' : cell === 'food' ? '.' : ' ';
-            }).join('')
-          ).join('\n')}
+          {Array.from({ length: gridSize }, (_, y) => (
+            <div key={y}>
+              {Array.from({ length: gridSize }, (_, x) => {
+                const cell = occupied.get(`${x},${y}`);
+                return (
+                  <span key={x} style={cell?.color ? { color: cell.color } : undefined}>
+                    {cell?.char ?? ' '}
+                  </span>
+                );
+              })}
+            </div>
+          ))}
         </pre>
       )}
 
