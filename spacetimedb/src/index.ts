@@ -50,6 +50,15 @@ const REPRODUCE_ENERGY_COST = 40;
 const CHILD_STARTING_ENERGY = 40;
 const MUTATION_RANGE = 0.15; // child size = parent size * (1 +/- this), max swing
 
+// Population floor: if the world thins past minPopulation, `tick` restocks
+// restockAmount creatures so it can't quietly spiral to zero when nobody is
+// watching. Both live on world_config (retunable via setPopulationFloor);
+// these are just the fresh-install seed values. Restocked creatures start
+// well-fed so the top-up actually takes instead of immediately starving.
+const DEFAULT_MIN_POPULATION = 20;
+const DEFAULT_RESTOCK_AMOUNT = 10;
+const RESTOCK_STARTING_ENERGY = 75;
+
 const FLEE_RADIUS = 15; // cells — how far a fleesLarger creature scans for a threat. Scaled with GRID_SIZE (was 4 at grid 80, same ~5% proportion) -- a fixed radius on a much bigger grid would almost never see anything
 const FLEE_SIZE_MARGIN = 1.2; // a creature counts as "larger" above this multiple
 const AGGRESSION_ENERGY_SCALE = 0.05; // per aggression point: burn/gain more, both ways
@@ -168,6 +177,51 @@ function multiplierForBiome(
     case BIOME_BARREN: return barren;
     default: return 1; // unknown biome -> neutral, never blocks simulation
   }
+}
+
+// Food kinds. `kind` is a column on `food` (0 = the old single food type,
+// unchanged, so a live world's existing rows keep behaving identically).
+// Each eats to a different energy/size payoff, so *where* a creature forages
+// starts to matter -- and each concentrates in the biome it belongs to
+// without ever being the only thing that spawns there.
+//   0 plankton -- common staple: balanced energy + growth (the old values)
+//   1 spore    -- mostly growth, little energy; clusters in nutrient blooms
+//   2 mineral  -- dense energy, no growth; clusters near thermal vents
+const FOOD_KIND_PLANKTON = 0;
+const FOOD_KIND_MINERAL = 2; // the dense-energy morsel worth fighting over (kind 1 = spore)
+const FOOD_KINDS: ReadonlyArray<{ energy: number; growth: number; weight: number; biome: number }> = [
+  { energy: ENERGY_FROM_FOOD, growth: SIZE_GROWTH_PER_MEAL, weight: 0.70, biome: -1 },
+  { energy: 10, growth: SIZE_GROWTH_PER_MEAL * 2.6, weight: 0.20, biome: BIOME_BLOOM },
+  { energy: ENERGY_FROM_FOOD * 2, growth: 0, weight: 0.10, biome: BIOME_VENT },
+];
+
+// "Ability matchup" used when two creatures reach for the same food cell in
+// one tick: size is the dominant trait (a bigger organism just crowds a
+// smaller one off the morsel), aggression is the tiebreak among similar
+// sizes. Pure function of row data -- a contest's outcome stays replayable,
+// see CLAUDE.md determinism decision.
+function contestScore(c: { size: number; aggression: number }): number {
+  return c.size * 10 + c.aggression;
+}
+
+// Weighted pick of a food kind for a spawn, biased toward the cell's biome:
+// a kind whose preferred biome matches gets 3x its base weight. Falls back
+// to plankton on any degenerate input -- never blocks a food spawn.
+function pickFoodKind(rng: ReturnType<typeof makeRng>, biomeHere: number): number {
+  const weights: number[] = [];
+  let total = 0;
+  for (const k of FOOD_KINDS) {
+    const w = k.biome === biomeHere ? k.weight * 3 : k.weight;
+    weights.push(w);
+    total += w;
+  }
+  if (total <= 0) return FOOD_KIND_PLANKTON;
+  let r = rng.next() * total;
+  for (let i = 0; i < weights.length; i++) {
+    r -= weights[i];
+    if (r < 0) return i;
+  }
+  return FOOD_KIND_PLANKTON;
 }
 
 // Approximate spawn location from a prompt's inferred habitat: reservoir-
@@ -409,6 +463,10 @@ const world_config = table(
     // speed (for accurate position-interpolation timing) without needing
     // access to the private tick_schedule table.
     tickIntervalMicros: t.u64().default(TICK_INTERVAL_MICROS),
+    // Population floor -- appended with defaults, same migrate-in-place reason
+    // as the columns above. Retunable live via setPopulationFloor.
+    minPopulation: t.u32().default(DEFAULT_MIN_POPULATION),
+    restockAmount: t.u32().default(DEFAULT_RESTOCK_AMOUNT),
   }
 );
 
@@ -484,6 +542,9 @@ const food = table(
     id: t.u64().primaryKey().autoInc(),
     x: t.u32(),
     y: t.u32(),
+    // Appended with a default so this is a migration-safe add -- existing
+    // food rows on a live world become plankton (kind 0). See FOOD_KINDS.
+    kind: t.u8().default(FOOD_KIND_PLANKTON),
   }
 );
 
@@ -527,7 +588,7 @@ export const init = spacetimedb.init(ctx => {
     });
   }
   for (let i = 0; i < INITIAL_FOOD_COUNT; i++) {
-    ctx.db.food.insert({ id: 0n, x: rng.int(GRID_SIZE), y: rng.int(GRID_SIZE) });
+    ctx.db.food.insert({ id: 0n, x: rng.int(GRID_SIZE), y: rng.int(GRID_SIZE), kind: FOOD_KIND_PLANKTON });
   }
 
   ctx.db.terrain.insert({ id: 0n, cells: generateTerrainCells(rng, GRID_SIZE) });
@@ -545,6 +606,8 @@ export const init = spacetimedb.init(ctx => {
     barrenFoodMult: 0.0, barrenBurnMult: 1.0,
     foodSpawnPerTick: DEFAULT_FOOD_SPAWN_PER_TICK,
     tickIntervalMicros: TICK_INTERVAL_MICROS,
+    minPopulation: DEFAULT_MIN_POPULATION,
+    restockAmount: DEFAULT_RESTOCK_AMOUNT,
     rngSeed: rng.seed(),
     tickCount: 0n,
     lastTickAt: ctx.timestamp,
@@ -596,6 +659,19 @@ export const setFoodConfig = spacetimedb.reducer(
     const state = ctx.db.world_config.id.find(0n);
     if (!state) return;
     ctx.db.world_config.id.update({ ...state, foodCap: cap, foodSpawnPerTick: spawnPerTick });
+  }
+);
+
+// Population floor: when the live population drops below `minPop`, `tick`
+// restocks `restock` creatures (cloned from survivors, or defaults if the
+// world is empty). Set restock to 0 to disable. CLI: `spacetime call
+// prompt-wars set_population_floor 20 10 --server <env>`.
+export const setPopulationFloor = spacetimedb.reducer(
+  { minPop: t.u32(), restock: t.u32() },
+  (ctx, { minPop, restock }) => {
+    const state = ctx.db.world_config.id.find(0n);
+    if (!state) return;
+    ctx.db.world_config.id.update({ ...state, minPopulation: minPop, restockAmount: restock });
   }
 );
 
@@ -743,8 +819,9 @@ export const tick = spacetimedb.reducer(
     const terrainCells = ctx.db.terrain.id.find(0n)?.cells;
 
     const creatures = [...ctx.db.creature.iter()];
-    const foodByCell = new Map<string, { id: bigint; x: number; y: number }>();
-    for (const f of ctx.db.food.iter()) foodByCell.set(`${f.x},${f.y}`, f);
+    const foodByCell = new Map<string, { id: bigint; x: number; y: number; kind: number }>();
+    for (const f of ctx.db.food.iter())
+      foodByCell.set(`${f.x},${f.y}`, { id: f.id, x: f.x, y: f.y, kind: f.kind });
 
     let population = creatures.length;
     const logs: string[] = [];
@@ -899,10 +976,35 @@ export const tick = spacetimedb.reducer(
       const cellKey = `${x},${y}`;
       const eaten = foodByCell.get(cellKey);
       if (eaten) {
-        energy = Math.min(MAX_ENERGY, energy + ENERGY_FROM_FOOD * aggressionScale);
-        size = Math.min(MAX_SIZE, size + SIZE_GROWTH_PER_MEAL);
-        ctx.db.food.id.delete(eaten.id);
-        foodByCell.delete(cellKey);
+        // Resource conflict. Any other non-predator whose tick-start position
+        // is within one cell of this morsel could be reaching for it too
+        // (creatures move at most one cell per tick). Higher contestScore
+        // wins; an exact tie breaks to the lower id. A loser simply doesn't
+        // eat this tick -- it already paid the move-energy cost, and the food
+        // stays put for the winner, who takes it on their own turn in this
+        // same loop or on the next tick.
+        const myScore = contestScore(current);
+        let rivalId: bigint | undefined;
+        for (const other of creatures) {
+          if (other.id === current.id || other.isPredator) continue;
+          if (manhattan(other.x, other.y, x, y) > 1) continue;
+          if (!ctx.db.creature.id.find(other.id)) continue; // died/eaten already this tick
+          const otherScore = contestScore(other);
+          if (otherScore > myScore || (otherScore === myScore && other.id < current.id)) {
+            rivalId = other.id;
+            break;
+          }
+        }
+        if (rivalId === undefined) {
+          const fk = FOOD_KINDS[eaten.kind] ?? FOOD_KINDS[FOOD_KIND_PLANKTON];
+          energy = Math.min(MAX_ENERGY, energy + fk.energy * aggressionScale);
+          size = Math.min(MAX_SIZE, size + fk.growth);
+          ctx.db.food.id.delete(eaten.id);
+          foodByCell.delete(cellKey);
+        } else if (eaten.kind === FOOD_KIND_MINERAL) {
+          // Only the valuable morsel's fights are worth a log line.
+          logs.push(`Creature #${current.id} was shoved off a mineral by #${rivalId}`);
+        }
       } else if (energy < STARVING_ENERGY_THRESHOLD) {
         size = Math.max(MIN_SIZE, size - SIZE_SHRINK_PER_TICK);
       }
@@ -964,12 +1066,13 @@ export const tick = spacetimedb.reducer(
       attempts++;
       const fx = rng.int(state.gridSize);
       const fy = rng.int(state.gridSize);
+      const fbiome = biomeAt(terrainCells, state.gridSize, fx, fy);
       const foodMult = multiplierForBiome(
-        biomeAt(terrainCells, state.gridSize, fx, fy),
+        fbiome,
         state.bloomFoodMult, state.coldFoodMult, state.ventFoodMult, state.barrenFoodMult
       );
       if (rng.next() < Math.min(1, foodMult * 0.5)) {
-        ctx.db.food.insert({ id: 0n, x: fx, y: fy });
+        ctx.db.food.insert({ id: 0n, x: fx, y: fy, kind: pickFoodKind(rng, fbiome) });
         foodCount++;
         spawned++;
       }
@@ -1004,6 +1107,43 @@ export const tick = spacetimedb.reducer(
           owner: undefined,
         });
         logs.push('A predator has appeared -- the population outgrew its food supply');
+      }
+    }
+
+    // Population floor: if the world has thinned past minPopulation, top it
+    // back up so it can't spiral to zero unattended. Each restocked creature
+    // echoes a random survivor's lineage (glyph/colour/behaviour) with a
+    // small size mutation -- a world that found a working niche repopulates
+    // with more of it -- and starts well-fed so the top-up actually takes.
+    // With no survivors at all it falls back to plain defaults, so the world
+    // always recovers even from a total wipe.
+    if (population < state.minPopulation && population < state.populationCap) {
+      const survivors = [...ctx.db.creature.iter()].filter(c => !c.isPredator);
+      const want = Math.min(state.restockAmount, state.populationCap - population);
+      const before = population;
+      for (let i = 0; i < want; i++) {
+        const parent = survivors.length > 0 ? survivors[rng.int(survivors.length)] : undefined;
+        const mutation = 1 + (rng.next() * 2 - 1) * MUTATION_RANGE;
+        ctx.db.creature.insert({
+          id: 0n,
+          x: rng.int(state.gridSize),
+          y: rng.int(state.gridSize),
+          energy: RESTOCK_STARTING_ENERGY,
+          size: parent ? clamp(parent.size * mutation, MIN_SIZE, MAX_SIZE) : 1,
+          glyph: parent ? parent.glyph : DEFAULT_CREATURE_PARAMS.glyph,
+          color: parent ? parent.color : DEFAULT_CREATURE_PARAMS.color,
+          seeksFood: parent ? parent.seeksFood : DEFAULT_CREATURE_PARAMS.seeksFood,
+          fleesLarger: parent ? parent.fleesLarger : DEFAULT_CREATURE_PARAMS.fleesLarger,
+          aggression: parent ? parent.aggression : DEFAULT_CREATURE_PARAMS.aggression,
+          prompt: parent ? parent.prompt : '(restock)',
+          isPredator: false,
+          kills: 0,
+          owner: undefined,
+        });
+        population++;
+      }
+      if (population > before) {
+        logs.push(`Population fell to ${before} -- restocked ${population - before} creatures`);
       }
     }
 

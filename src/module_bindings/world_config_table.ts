@@ -28,4 +28,6 @@ export default __t.row({
   barrenBurnMult: __t.f32().name("barren_burn_mult"),
   foodSpawnPerTick: __t.u32().name("food_spawn_per_tick"),
   tickIntervalMicros: __t.u64().name("tick_interval_micros"),
+  minPopulation: __t.u32().name("min_population"),
+  restockAmount: __t.u32().name("restock_amount"),
 });

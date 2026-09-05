@@ -14,6 +14,7 @@ import SetFoodConfigReducer from "../set_food_config_reducer";
 import SetGridSizeReducer from "../set_grid_size_reducer";
 import SetLlmKeyReducer from "../set_llm_key_reducer";
 import SetPopulationCapReducer from "../set_population_cap_reducer";
+import SetPopulationFloorReducer from "../set_population_floor_reducer";
 import SetTickSpeedReducer from "../set_tick_speed_reducer";
 import SpawnPredatorReducer from "../spawn_predator_reducer";
 
@@ -25,6 +26,7 @@ export type SetFoodConfigParams = __Infer<typeof SetFoodConfigReducer>;
 export type SetGridSizeParams = __Infer<typeof SetGridSizeReducer>;
 export type SetLlmKeyParams = __Infer<typeof SetLlmKeyReducer>;
 export type SetPopulationCapParams = __Infer<typeof SetPopulationCapReducer>;
+export type SetPopulationFloorParams = __Infer<typeof SetPopulationFloorReducer>;
 export type SetTickSpeedParams = __Infer<typeof SetTickSpeedReducer>;
 export type SpawnPredatorParams = __Infer<typeof SpawnPredatorReducer>;
 

@@ -25,7 +25,13 @@ const BIOME_BASE_RGB: [number, number, number][] = [
   [58, 36, 18], // thermal vent -- muted amber-brown, #3a2412
   [10, 16, 22], // barren -- near-black cool, #0a1016
 ];
-const FOOD_COLOR = '#9dffcf';
+// Food colour + relative size per `kind` (see spacetimedb/src/index.ts
+// FOOD_KINDS): 0 plankton keeps the original mint so the common case looks
+// unchanged; 1 spore is a small bloom-pink mote; 2 mineral -- the dense-energy
+// "good" food -- is a bigger, brighter gold nugget that reads as worth chasing.
+const FOOD_COLOR = '#9dffcf'; // kind 0, and the fallback for an unknown kind
+const FOOD_COLORS = ['#9dffcf', '#ff77cf', '#ffc21f'];
+const FOOD_SIZE_MULT = [1, 0.85, 1.5];
 const VOID_COLOR = '#05070c'; // outside the dish, when panned past the edge
 
 // One pixel per world cell, flat per-biome colour -- no per-cell jitter.
@@ -318,17 +324,18 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
     // saturated thing on screen besides creatures.
     for (const f of foodRef.current) {
       const p = worldToScreen(f.x + 0.5, f.y + 0.5);
-      const r = Math.max(1.5, cam.zoom * 0.1);
+      const r = Math.max(1.5, cam.zoom * 0.1) * (FOOD_SIZE_MULT[f.kind] ?? 1);
+      const color = FOOD_COLORS[f.kind] ?? FOOD_COLOR;
 
       const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
-      bloom.addColorStop(0, FOOD_COLOR);
+      bloom.addColorStop(0, color);
       bloom.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = bloom;
       ctx.beginPath();
       ctx.arc(p.x, p.y, r * 3, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.fillStyle = FOOD_COLOR;
+      ctx.fillStyle = color;
       ctx.beginPath();
       ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx.fill();

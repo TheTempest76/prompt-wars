@@ -40,6 +40,7 @@ export const Food = __t.object("Food", {
   id: __t.u64(),
   x: __t.u32(),
   y: __t.u32(),
+  kind: __t.u8(),
 });
 export type Food = __Infer<typeof Food>;
 
@@ -93,6 +94,8 @@ export const WorldConfig = __t.object("WorldConfig", {
   barrenBurnMult: __t.f32(),
   foodSpawnPerTick: __t.u32(),
   tickIntervalMicros: __t.u64(),
+  minPopulation: __t.u32(),
+  restockAmount: __t.u32(),
 });
 export type WorldConfig = __Infer<typeof WorldConfig>;
 

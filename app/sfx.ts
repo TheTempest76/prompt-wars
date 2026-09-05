@@ -54,8 +54,12 @@ export function setSfxMuted(next: boolean): void {
   }
 }
 
+// Per-kind base pitch (Hz) so plankton / spore / mineral each sound distinct.
+// Index matches FOOD_KINDS in spacetimedb/src/index.ts.
+const FOOD_PITCH = [520, 700, 380];
+
 // Short plucked blip: a triangle tone that snaps up in pitch and decays fast.
-export function playFoodPickup(): void {
+export function playFoodPickup(kind = 0): void {
   if (muted) return;
   const c = ensureCtx();
   if (!c || c.state !== 'running') return;
@@ -69,7 +73,7 @@ export function playFoodPickup(): void {
   const gain = c.createGain();
 
   // A little pitch variety so repeated eats don't sound robotic.
-  const base = 520 + Math.random() * 90;
+  const base = (FOOD_PITCH[kind] ?? FOOD_PITCH[0]) + Math.random() * 90;
   osc.type = 'triangle';
   osc.frequency.setValueAtTime(base, t);
   osc.frequency.exponentialRampToValueAtTime(base * 1.9, t + 0.06);

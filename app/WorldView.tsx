@@ -20,7 +20,9 @@ export function WorldView() {
   // A food row is deleted the moment a creature eats it — blip on that.
   // playFoodPickup() rate-limits itself, so a same-tick eating spree is one
   // sound, not a burst.
-  const [foodRows] = useTable(tables.food, { onDelete: () => playFoodPickup() });
+  const [foodRows] = useTable(tables.food, {
+    onDelete: row => playFoodPickup(row.kind),
+  });
   const [events] = useTable(tables.event_log);
   const [terrainRows] = useTable(tables.terrain);
   // Small guestbook table -- a second subscription alongside PersonList's own
