@@ -22,12 +22,26 @@ export default async function Home() {
   }
 
   return (
-    <main style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>
+    <main
+      style={{
+        maxWidth: '58rem',
+        margin: '0 auto',
+        padding: '2.5rem 1.5rem 4rem',
+      }}
+    >
       <FirstLoadOverlay />
-      <h1>Prompt Wars</h1>
+      <header style={{ marginBottom: '1.5rem' }}>
+        <h1 style={{ fontSize: '1.6rem', letterSpacing: '-0.01em', margin: 0 }}>
+          Prompt Wars
+        </h1>
+        <p style={{ margin: '0.3rem 0 0', color: 'var(--muted)', maxWidth: '38rem' }}>
+          A shared petri dish of LLM-compiled creatures. The world keeps ticking
+          whether or not anyone is watching.
+        </p>
+      </header>
       <PersonList initialPeople={initialPeople} />
-      <WorldView />
       <SpawnCreature />
+      <WorldView />
     </main>
   );
 }

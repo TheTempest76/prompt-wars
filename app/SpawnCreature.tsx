@@ -11,6 +11,9 @@ export function SpawnCreature() {
   const [status, setStatus] = useState<'idle' | 'spawning'>('idle');
   const [summary, setSummary] = useState<string | null>(null);
 
+  const busy = status === 'spawning';
+  const canSubmit = connected && !busy && prompt.trim().length > 0;
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim() || !connected) return;
@@ -31,22 +34,37 @@ export function SpawnCreature() {
   };
 
   return (
-    <div style={{ marginTop: '2rem', borderTop: '1px solid #ccc', paddingTop: '1rem' }}>
-      <h2>Spawn a creature</h2>
-      <form onSubmit={submit} style={{ marginBottom: '0.5rem' }}>
+    <section className="panel">
+      <span className="eyebrow">Spawn a creature</span>
+      <p style={{ margin: '0.25rem 0 0.75rem', fontSize: '0.85rem', color: 'var(--muted)' }}>
+        Describe one in plain language — an LLM compiles it into a glyph, behavior, and habitat.
+      </p>
+
+      <form
+        onSubmit={submit}
+        style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'stretch' }}
+      >
         <input
+          className="field"
           type="text"
           placeholder="a tiny fast red hummingbird that flees everything"
           value={prompt}
           onChange={e => setPrompt(e.target.value)}
-          disabled={!connected || status === 'spawning'}
-          style={{ padding: '0.5rem', marginRight: '0.5rem', width: '22rem' }}
+          disabled={!connected || busy}
+          aria-label="Creature description"
+          style={{ flex: '1 1 24rem', minWidth: 0 }}
         />
-        <button type="submit" disabled={!connected || status === 'spawning'}>
-          {status === 'spawning' ? 'Compiling...' : 'Spawn'}
+        <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
+          {busy ? 'Compiling…' : 'Spawn'}
         </button>
       </form>
-      {summary && <p>{summary}</p>}
-    </div>
+
+      {!connected && (
+        <p style={{ margin: '0.6rem 0 0', fontSize: '0.8rem', color: 'var(--muted)' }}>
+          Connecting to the world…
+        </p>
+      )}
+      {summary && <p style={{ margin: '0.6rem 0 0', fontSize: '0.9rem' }}>{summary}</p>}
+    </section>
   );
 }

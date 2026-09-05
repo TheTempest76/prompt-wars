@@ -25,6 +25,7 @@ DB_NAME="prompt-wars"
 
 i=0
 while IFS= read -r line; do
+  line="${line%$'\r'}"   # tolerate CRLF line endings (this repo is Windows)
   [[ -z "$line" ]] && continue
   i=$((i + 1))
   echo "[$i] $line"

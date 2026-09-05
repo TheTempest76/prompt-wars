@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTable } from 'spacetimedb/react';
 import { tables } from '../src/module_bindings';
 import { WorldCanvas } from './WorldCanvas';
+import { isSfxMuted, playFoodPickup, setSfxMuted, unlockSfx } from './sfx';
 
 function formatTime(micros: bigint): string {
   return new Date(Number(micros / 1000n)).toLocaleTimeString();
@@ -16,12 +17,33 @@ export function WorldView() {
   // not one per component that wants the data.
   const [configs] = useTable(tables.world_config);
   const [creatures] = useTable(tables.creature);
-  const [foodRows] = useTable(tables.food);
+  // A food row is deleted the moment a creature eats it — blip on that.
+  // playFoodPickup() rate-limits itself, so a same-tick eating spree is one
+  // sound, not a burst.
+  const [foodRows] = useTable(tables.food, { onDelete: () => playFoodPickup() });
   const [events] = useTable(tables.event_log);
   const [terrainRows] = useTable(tables.terrain);
   // Small guestbook table -- a second subscription alongside PersonList's own
   // is negligible here, unlike creature/food (see ARCHITECTURE.md).
   const [people] = useTable(tables.person);
+
+  // Read once on mount, not during render — isSfxMuted() touches localStorage
+  // and would mismatch the server-rendered markup.
+  const [muted, setMuted] = useState(false);
+  useEffect(() => {
+    setMuted(isSfxMuted());
+    // Returning visitors skip the intro overlay, so unlock audio on their
+    // first interaction with the page instead.
+    const onFirstGesture = () => unlockSfx();
+    window.addEventListener('pointerdown', onFirstGesture, { once: true });
+    return () => window.removeEventListener('pointerdown', onFirstGesture);
+  }, []);
+  const toggleMuted = () => {
+    const next = !muted;
+    setMuted(next);
+    setSfxMuted(next);
+    if (!next) unlockSfx();
+  };
 
   const config = configs[0];
   const gridSize = config ? Number(config.gridSize) : 0;
@@ -56,16 +78,73 @@ export function WorldView() {
     )
     .slice(0, 10);
 
+  const metrics: { label: string; value: string; sub?: string }[] = [
+    {
+      label: 'Tick',
+      value: config ? Number(config.tickCount).toLocaleString() : '—',
+      sub: config ? `last ${formatTime(config.lastTickAt.microsSinceUnixEpoch)}` : undefined,
+    },
+    {
+      label: 'Creatures',
+      value: config ? `${creatures.length} / ${Number(config.populationCap)}` : `${creatures.length}`,
+    },
+    {
+      label: 'Food',
+      value: config ? `${foodRows.length} / ${Number(config.foodCap)}` : `${foodRows.length}`,
+    },
+  ];
+
   return (
-    <div style={{ marginTop: '2rem', borderTop: '1px solid #ccc', paddingTop: '1rem' }}>
-      <h2>World</h2>
-      <p>
-        Tick <strong>{config ? Number(config.tickCount) : '...'}</strong>
-        {config && <> — last at {formatTime(config.lastTickAt.microsSinceUnixEpoch)}</>}
-        {' — '}
-        {creatures.length}/{config ? Number(config.populationCap) : '?'} creatures,{' '}
-        {foodRows.length}/{config ? Number(config.foodCap) : '?'} food
-      </p>
+    <section className="panel">
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          justifyContent: 'space-between',
+          gap: '1rem',
+          flexWrap: 'wrap',
+          marginBottom: '0.75rem',
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <span className="eyebrow">World</span>
+          <button
+            type="button"
+            onClick={toggleMuted}
+            aria-label={muted ? 'Unmute sound effects' : 'Mute sound effects'}
+            aria-pressed={muted}
+            title={muted ? 'Sound off' : 'Sound on'}
+            style={{
+              border: 'none',
+              background: 'none',
+              cursor: 'pointer',
+              padding: 0,
+              fontSize: '0.9rem',
+              lineHeight: 1,
+              color: 'var(--muted)',
+            }}
+          >
+            {muted ? '🔇' : '🔊'}
+          </button>
+        </span>
+        <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+          {metrics.map(m => (
+            <div key={m.label} style={{ lineHeight: 1.2 }}>
+              <span className="eyebrow" style={{ fontSize: '0.62rem' }}>
+                {m.label}
+              </span>
+              <div className="mono" style={{ fontSize: '1rem', fontWeight: 600 }}>
+                {m.value}
+              </div>
+              {m.sub && (
+                <div className="mono" style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>
+                  {m.sub}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
 
       {gridSize > 0 && (
         <WorldCanvas
@@ -78,15 +157,30 @@ export function WorldView() {
         />
       )}
 
-      <h3>Recent events</h3>
-      <ul>
-        {recentEvents.length === 0 && <li>(none yet)</li>}
-        {recentEvents.map(e => (
-          <li key={Number(e.id)}>
-            {e.message} — {formatTime(e.at.microsSinceUnixEpoch)}
-          </li>
-        ))}
-      </ul>
-    </div>
+      <div style={{ marginTop: '1rem' }}>
+        <span className="eyebrow">Recent events</span>
+        <ul style={{ listStyle: 'none', margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
+          {recentEvents.length === 0 && (
+            <li style={{ color: 'var(--muted)' }}>Nothing has happened yet.</li>
+          )}
+          {recentEvents.map(e => (
+            <li
+              key={Number(e.id)}
+              style={{
+                display: 'flex',
+                gap: '0.75rem',
+                padding: '0.25rem 0',
+                borderBottom: '1px solid var(--rule)',
+              }}
+            >
+              <span className="mono" style={{ color: 'var(--muted)', flexShrink: 0 }}>
+                {formatTime(e.at.microsSinceUnixEpoch)}
+              </span>
+              <span>{e.message}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
   );
 }

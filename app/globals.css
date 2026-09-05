@@ -1,7 +1,42 @@
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+}
+
+* {
   padding: 0;
   margin: 0;
+}
+
+:root {
+  --bg: #f6f5f1;
+  --ink: #26231e;
+  --muted: #6c665b;
+  --rule: #d9d5ca;
+  --accent: #2f7d5b;
+  --accent-ink: #fff;
+  --field-bg: #ffffff;
+  --field-border: #c7c1b4;
+  --good: #2f7d5b;
+  --bad: #b04a3c;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1013;
+    --ink: #e4e2db;
+    --muted: #8b877f;
+    --rule: #26292f;
+    --accent: #4bb487;
+    --accent-ink: #06130d;
+    --field-bg: #16191d;
+    --field-border: #363b42;
+    --good: #4bb487;
+    --bad: #d9776a;
+  }
 }
 
 html,
@@ -11,8 +46,11 @@ body {
 }
 
 body {
-  color: #333;
-  background: #fafafa;
+  color: var(--ink);
+  background: var(--bg);
+  font-family: var(--sans);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
@@ -20,9 +58,81 @@ a {
   text-decoration: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  body {
-    color: #eee;
-    background: #111;
-  }
+/* --- shared building blocks ------------------------------------------- */
+
+.eyebrow {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.panel {
+  border-top: 1px solid var(--rule);
+  padding-top: 1.25rem;
+  margin-top: 1.75rem;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.field {
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--field-border);
+  background: var(--field-bg);
+  color: inherit;
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+.field:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.field:disabled {
+  opacity: 0.55;
+}
+
+.btn {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  border: 1px solid var(--field-border);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  vertical-align: baseline;
 }

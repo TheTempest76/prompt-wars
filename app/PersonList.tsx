@@ -42,44 +42,58 @@ export function PersonList({ initialPeople }: PersonListProps) {
   };
 
   return (
-    <>
-      <div style={{ marginBottom: '1rem' }}>
-        Status:{' '}
-        <strong style={{ color: connected ? 'green' : 'red' }}>
-          {connected ? 'Connected' : 'Connecting...'}
-        </strong>
+    <section className="panel" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          justifyContent: 'space-between',
+          gap: '1rem',
+          flexWrap: 'wrap',
+        }}
+      >
+        <span className="eyebrow">
+          Guestbook · {displayPeople.length} {displayPeople.length === 1 ? 'name' : 'names'}
+        </span>
+        <span style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>
+          <span
+            className="status-dot"
+            style={{ background: connected ? 'var(--good)' : 'var(--bad)', marginRight: '0.4rem' }}
+          />
+          {connected ? 'connected' : 'connecting…'}
+        </span>
       </div>
 
-      <form onSubmit={addPerson} style={{ marginBottom: '2rem' }}>
+      <form
+        onSubmit={addPerson}
+        style={{ display: 'flex', gap: '0.5rem', margin: '0.65rem 0 0.9rem', flexWrap: 'wrap' }}
+      >
         <input
+          className="field"
           type="text"
-          placeholder="Enter name"
+          placeholder="Sign in — your initials label your creatures"
           value={name}
           onChange={e => setName(e.target.value)}
-          style={{ padding: '0.5rem', marginRight: '0.5rem' }}
+          style={{ flex: '1 1 18rem', minWidth: 0 }}
           disabled={!connected}
         />
-        <button
-          type="submit"
-          style={{ padding: '0.5rem 1rem' }}
-          disabled={!connected}
-        >
-          Add Person
+        <button className="btn" type="submit" disabled={!connected || !name.trim()}>
+          Sign
         </button>
       </form>
 
-      <div>
-        <h2>People ({displayPeople.length})</h2>
-        {displayPeople.length === 0 ? (
-          <p>No people yet. Add someone above!</p>
-        ) : (
-          <ul>
-            {displayPeople.map((person, index) => (
-              <li key={index}>{person.name}</li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </>
+      {displayPeople.length === 0 ? (
+        <p style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>No one has signed in yet.</p>
+      ) : (
+        <p style={{ fontSize: '0.9rem', color: 'var(--muted)', lineHeight: 1.7 }}>
+          {displayPeople.map((person, index) => (
+            <span key={index}>
+              {index > 0 && ' · '}
+              <span style={{ color: 'var(--ink)' }}>{person.name}</span>
+            </span>
+          ))}
+        </p>
+      )}
+    </section>
   );
 }
