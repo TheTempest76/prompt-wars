@@ -5,12 +5,12 @@ import { ScheduleAt } from 'spacetimedb';
 const TICK_INTERVAL_MICROS = 2_000_000n; // 2 seconds
 const EVENT_LOG_MAX_ROWS = 50;
 
-const GRID_SIZE = 40;
-const DEFAULT_POPULATION_CAP = 60;
-const DEFAULT_FOOD_CAP = 80;
-const FOOD_SPAWN_PER_TICK = 2;
-const INITIAL_CREATURE_COUNT = 8;
-const INITIAL_FOOD_COUNT = 20;
+const GRID_SIZE = 20;
+const DEFAULT_POPULATION_CAP = 20;
+const DEFAULT_FOOD_CAP = 25;
+const FOOD_SPAWN_PER_TICK = 1;
+const INITIAL_CREATURE_COUNT = 5;
+const INITIAL_FOOD_COUNT = 8;
 
 const ENERGY_BURN_PER_TICK = 2;
 const ENERGY_FROM_FOOD = 30;
