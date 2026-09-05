@@ -169,6 +169,25 @@ says so, and your edits are gone on the next `generate`.
   "always answer X" and every creature got the same glyph. Placeholders need to look
   unmistakably like placeholders — `<pick one character or emoji that fits, e.g. "🦂">`
   — not something that parses as valid JSON on its own.
+- **If one environment's schema falls behind another's, the client silently breaks in
+  that environment — not with an error you'll notice, with data that just never
+  arrives.** `.env.local` pointed the browser at Maincloud while only `local` had
+  Checkpoint 4's new `creature` columns; the client bindings (generated against
+  `local`) expected `glyph`/`seeksFood`/etc. on every row, Maincloud's actual rows
+  didn't have them, decoding failed, and the entire `world_config`/`creature`
+  subscription just never populated — symptom: "the whole World section is stuck on
+  placeholders," not a visible error. Whenever something that used to render goes
+  blank after a schema change, check `spacetime describe <db> --server <env> --json`
+  against *the environment `.env.local` actually points at*, not just the one you
+  happened to publish to most recently.
+- **Adding `.default(value)` to a newly-appended column lets a schema change reach an
+  already-running world via a normal `spacetime publish` — no `--delete-data=always`,
+  no lost history.** This is what fixed the Maincloud mismatch above without wiping its
+  (by then) 1000+-tick-old population: added `.default(...)` matching
+  `DEFAULT_CREATURE_PARAMS` to the six new `creature` columns, republished normally, and
+  the migration plan showed `Created columns ... (default: ...)` instead of destroying
+  the table. Only works for newly-appended non-key columns (see CLAUDE.md) — reach for
+  this before `--delete-data=always` whenever the data is worth keeping.
 
 ## Checkpoint 1 status
 
@@ -332,7 +351,12 @@ now renders each creature's actual `glyph`/`color` instead of a generic `C`.
   everything"* → `aggression 0, fleesLarger true`. This is the strongest evidence the
   whole path works, not just its failure/fallback branch.
 
-Not yet done: republishing this schema to Maincloud (local only, so far — grid/entity
-counts and the Groq key on Maincloud still reflect the pre-Checkpoint-4 shape until
-that happens), and a literal browser click-through (no browser automation available
-this session — the scripted client-binding check above exercises the same code path).
+**Update: published to Maincloud too**, non-destructively — see the gotcha below on
+using `.default()` to avoid a wipe. Verified there the same way as local: a real Groq
+key set, a live spawn (*"graceful arctic fox, flees anything bigger"* → `🦊`, a teal
+color, `aggression 3`, `fleesLarger true`), and a scripted client subscribe confirming
+`world_config`/`creature`/`food` all decode cleanly.
+
+Still not done: a literal browser click-through (no browser automation available this
+session — the scripted client-binding checks above exercise the same code path the
+browser UI does).

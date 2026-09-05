@@ -185,12 +185,15 @@ const creature = table(
     y: t.u32(),
     energy: t.f32(),
     size: t.f32(),
-    glyph: t.string(),
-    color: t.string(),
-    seeksFood: t.bool(),
-    fleesLarger: t.bool(),
-    aggression: t.u8(),
-    prompt: t.string(), // the original one-line description, for explainability
+    // Defaults let this migrate onto an already-running world (e.g. Maincloud)
+    // via a normal hot-swap publish instead of a --delete-data wipe —
+    // pre-existing rows backfill with these values.
+    glyph: t.string().default(DEFAULT_CREATURE_PARAMS.glyph),
+    color: t.string().default(DEFAULT_CREATURE_PARAMS.color),
+    seeksFood: t.bool().default(DEFAULT_CREATURE_PARAMS.seeksFood),
+    fleesLarger: t.bool().default(DEFAULT_CREATURE_PARAMS.fleesLarger),
+    aggression: t.u8().default(DEFAULT_CREATURE_PARAMS.aggression),
+    prompt: t.string().default('(pre-existing)'), // for explainability
   }
 );
 
