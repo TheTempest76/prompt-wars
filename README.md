@@ -360,3 +360,37 @@ color, `aggression 3`, `fleesLarger true`), and a scripted client subscribe conf
 Still not done: a literal browser click-through (no browser automation available this
 session — the scripted client-binding checks above exercise the same code path the
 browser UI does).
+
+## Canvas world renderer status
+
+Replaced the ASCII `<pre>` grid with a real `<canvas>` + camera in `app/WorldCanvas.tsx`
+(`app/WorldView.tsx` now just fetches and passes props down). Grid grew to 80×80 on both
+environments — live, via a new `set_grid_size` reducer, no wipe. See
+`ARCHITECTURE.md`'s `app/WorldCanvas.tsx` section for the "what to change where" map.
+
+**What's actually verified, and how:**
+- `tsc --noEmit` clean, module builds clean, both after the schema-level `set_grid_size`
+  addition and after regenerating bindings.
+- Both environments grew to 80×80 via `set_grid_size` with **zero data loss** —
+  Maincloud's tick counter didn't reset (it was already past 1900 ticks before this
+  change and kept climbing straight through).
+- A scripted two-connection check (the "two tabs" proof, run the same way as every prior
+  checkpoint): tab A reads `gridSize: 80`; tab B, a fully independent connection, saw
+  `world_config`'s `tickCount` advance via its live subscription with no poll, no
+  refresh; tab B's `creature`/`food` counts came back intact post-growth. This confirms
+  the *data path* into `WorldCanvas`'s props is live and correct.
+
+**What is *not* verified, and why:** everything specific to actually looking at or
+touching the canvas — crisp rendering at real device pixel ratios, one-finger pan,
+pinch-zoom, `touch-action: none` actually preventing page scroll, the fit-to-view on
+first load, keyboard pan/zoom, and whether the on-screen keyboard covers the spawn
+input. **No browser or phone was available in this session** (browser automation was
+declined earlier and remains off) — everything above the data layer is implemented
+against the letter of the spec and reviewed by reading the code back against every
+requirement, but genuinely untested by eye or by touch. This is not "verified as
+working," it's "verified as wired up correctly as far as I can check without a screen."
+**Please test on a real phone before trusting this** — open it over the local network
+or the Maincloud URL, not devtools' device emulation, and check: not blurry, one-finger
+pan, pinch zoom, the page itself doesn't scroll while panning, and the spawn input is
+still reachable/typeable with the keyboard up. Report back what breaks; I have no way to
+find that myself right now.

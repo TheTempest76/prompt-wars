@@ -15,7 +15,7 @@ const LLM_MAX_TOKENS = 500; // must cover reasoning tokens *and* the JSON conten
 const LLM_TIMEOUT_MILLIS = 4000;
 const MAX_PROMPT_LENGTH = 200;
 
-const GRID_SIZE = 20;
+const GRID_SIZE = 80; // seed value for fresh installs — see setGridSize for live worlds
 const DEFAULT_POPULATION_CAP = 20;
 const DEFAULT_FOOD_CAP = 25;
 const FOOD_SPAWN_PER_TICK = 1;
@@ -305,6 +305,21 @@ export const setPopulationCap = spacetimedb.reducer(
     const state = ctx.db.world_config.id.find(0n);
     if (!state) return;
     ctx.db.world_config.id.update({ ...state, populationCap: cap });
+  }
+);
+
+// Grows (or shrinks) an already-running world live, without republishing —
+// existing creature/food positions stay valid since they're always within
+// [0, oldSize) which is a subset of any larger [0, newSize). Future
+// movement/food-spawns immediately use the new bound (they read
+// world_config.gridSize fresh each tick). CLI: `spacetime call prompt-wars
+// set_grid_size 80 --server <env>`.
+export const setGridSize = spacetimedb.reducer(
+  { size: t.u32() },
+  (ctx, { size }) => {
+    const state = ctx.db.world_config.id.find(0n);
+    if (!state) return;
+    ctx.db.world_config.id.update({ ...state, gridSize: size });
   }
 );
 

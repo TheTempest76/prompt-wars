@@ -36,6 +36,7 @@ import {
 // Import all reducer arg schemas
 import AddReducer from "./add_reducer";
 import SayHelloReducer from "./say_hello_reducer";
+import SetGridSizeReducer from "./set_grid_size_reducer";
 import SetLlmKeyReducer from "./set_llm_key_reducer";
 import SetPopulationCapReducer from "./set_population_cap_reducer";
 
@@ -110,6 +111,7 @@ const tablesSchema = __schema({
 const reducersSchema = __reducers(
   __reducerSchema("add", AddReducer),
   __reducerSchema("say_hello", SayHelloReducer),
+  __reducerSchema("set_grid_size", SetGridSizeReducer),
   __reducerSchema("set_llm_key", SetLlmKeyReducer),
   __reducerSchema("set_population_cap", SetPopulationCapReducer),
 );

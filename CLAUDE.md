@@ -17,9 +17,22 @@ aren't re-derived or re-argued every session.
   (`next dev -p 3001` in `package.json`). They silently fight over `3000` otherwise —
   see README gotchas.
 - **Database name:** `prompt-wars`, both on `local` and on `maincloud`.
-- **Grid:** fixed 40×40. **Tick interval:** ~2 seconds, via a scheduled reducer.
-  **Population cap:** a tunable column on `world_config`, not a constant — must be
-  changeable via a reducer without republishing.
+- **Grid:** live-tunable, not fixed — `world_config.gridSize`, currently `80` on both
+  environments (`GRID_SIZE` in `spacetimedb/src/index.ts` only seeds *fresh* installs;
+  an already-running world is grown via `set_grid_size`, never a schema change). Always
+  read it from config client-side, never hardcode a grid size in the client.
+  **Tick interval:** ~2 seconds, via a scheduled reducer. **Population cap:** a tunable
+  column on `world_config`, not a constant — must be changeable via a reducer without
+  republishing.
+- **World rendering is `<canvas>` with a camera, not text glyphs.** `app/WorldCanvas.tsx`
+  owns sizing (ResizeObserver + devicePixelRatio, never `window.resize`), camera state
+  (`{x,y,zoom}`, one `worldToScreen` helper, no scattered offset math), input (Pointer
+  Events for pan/pinch, keyboard for arrows/WASD/+-/0 — gated off whenever a text input
+  is focused), and a single `requestAnimationFrame` loop that also lerps creature
+  positions between ticks (`TICK_INTERVAL_MS`) so they don't teleport. `app/WorldView.tsx`
+  stays the one place subscribing to `world_config`/`creature`/`food`/`event_log` and
+  passes rows down as props — don't add a second `useTable` call for the same table
+  inside `WorldCanvas`, that'd double the subscription.
 - **Determinism:** don't rely on bare `ctx.random()` for anything you need to explain
   after the fact — it's seeded from `ctx.timestamp`, not from table state. Store an
   explicit `rngSeed: t.u64()` column on `world_config` and advance it yourself each
