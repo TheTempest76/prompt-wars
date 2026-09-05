@@ -100,10 +100,17 @@ says so, and your edits are gone on the next `generate`.
   in `package.json`'s `dev`/`start` scripts (`next dev -p 3001`). If you ever see that
   10-second timeout again, check `netstat -ano | grep 3000` for two LISTENING PIDs before
   you suspect anything else.
-- **Your CLAUDE.md said `table({ scheduled: ... })`.** That form is deprecated in SDK
-  2.10.0. Use `spacetimedb.reducer({ onSchedule: someTable }, ...)` instead — the schema
-  and the reducer can live in separate files this way, which matters once `index.ts`
-  gets split up. See Checkpoint 2.
+- **`table({ scheduled: ... })` is deprecated in SDK 2.10.0** — use
+  `spacetimedb.reducer({ onSchedule: someTable }, ...)` instead (what `tick` in
+  `spacetimedb/src/index.ts` actually uses). The schema and the reducer can live in
+  separate files this way, which matters once `index.ts` gets split up.
+- **`init` only runs on a database's *very first* `publish`, ever.** Adding a new
+  scheduled table (or any other row `init` is supposed to seed) to an *already-existing*
+  database does nothing on a normal republish — `init` doesn't re-fire just because the
+  schema changed. Symptom: your new table exists but stays empty, and a scheduled reducer
+  never fires because nothing ever inserted a row into its schedule table. Fix: republish
+  with `--delete-data=always` (wipes and re-runs `init`), or seed the row by hand with
+  `spacetime call`.
 - **`ctx.random` is seeded from `ctx.timestamp`, not from anything in your tables.**
   It's reproducible on replay (SpacetimeDB records the call's timestamp), but you can't
   explain a creature's behavior just by reading table state. We store an explicit
@@ -132,3 +139,31 @@ available in this session to literally screenshot two tabs; the two-connection c
 exercises the identical code path the UI depends on. Worth a 30-second manual sanity
 check yourself: open http://localhost:3001 in two windows, add a name in one, watch it
 appear in the other with no refresh.)
+
+## Checkpoint 2 status
+
+Done: `world_tick` (singleton counter row), `tick_schedule` (private, drives the
+schedule), and `event_log` (bounded to the last 50 rows, trimmed every tick) in
+`spacetimedb/src/index.ts`. The `tick` reducer is bound via
+`spacetimedb.reducer({ onSchedule: tick_schedule }, ...)` and fires every 2 seconds
+forever. Both public tables render live in `app/WorldTick.tsx`.
+
+Verified with zero client connections open — no browser tabs, no CLI queries, nothing
+touching the module — for 65 seconds:
+
+```
+before: id=0  count=48   last_tick_at=2026-09-05T13:18:44Z
+                       (65s wait, nothing connected)
+after:  id=0  count=106  last_tick_at=2026-09-05T13:20:40Z
+```
+
+58 ticks over ~116 seconds elapsed, matching the 2-second interval — the reducer kept
+firing purely off the schedule table, independent of any client. `event_log` held
+steady at exactly 50 rows (`SELECT COUNT(*) AS n FROM event_log`) the whole time,
+confirming the trim logic bounds it instead of growing forever.
+
+This was checked against the **local** server, not Maincloud — `spacetime start`
+staying up is what kept the tick alive here, not any property of Maincloud specifically.
+The real "keeps running when everyone logs off, including you and your laptop" claim
+needs Maincloud (`npm run spacetime:publish`) before the actual demo; local only proves
+the *reducer logic* doesn't depend on a connected client, which was the part in doubt.

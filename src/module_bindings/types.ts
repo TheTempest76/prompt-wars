@@ -10,8 +10,29 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const EventLog = __t.object("EventLog", {
+  id: __t.u64(),
+  tickNumber: __t.u64(),
+  message: __t.string(),
+  at: __t.timestamp(),
+});
+export type EventLog = __Infer<typeof EventLog>;
+
 export const Person = __t.object("Person", {
   name: __t.string(),
 });
 export type Person = __Infer<typeof Person>;
+
+export const TickSchedule = __t.object("TickSchedule", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type TickSchedule = __Infer<typeof TickSchedule>;
+
+export const WorldTick = __t.object("WorldTick", {
+  id: __t.u64(),
+  count: __t.u64(),
+  lastTickAt: __t.timestamp(),
+});
+export type WorldTick = __Infer<typeof WorldTick>;
 
