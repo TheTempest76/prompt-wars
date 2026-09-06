@@ -672,6 +672,20 @@ const food_grant = table(
   }
 );
 
+// Retention mailing list. Private -- emails never go out over a client
+// subscription; only the DB owner reads this (spacetime sql) to export.
+// One row per identity, most-recent write wins (setPlayerEmail upserts).
+const player_email = table(
+  {},
+  {
+    owner: t.identity().primaryKey(),
+    email: t.string(),
+    source: t.string(), // 'landing_page' | 'game' | ...
+    optedIn: t.bool(),
+    updatedAt: t.timestamp(),
+  }
+);
+
 const spacetimedb = schema({
   person,
   world_config,
@@ -680,6 +694,7 @@ const spacetimedb = schema({
   food,
   food_grant,
   powerup,
+  player_email,
   event_log,
   llm_secret,
   terrain,
@@ -750,6 +765,33 @@ export const add = spacetimedb.reducer(
   { name: t.string() },
   (ctx, { name }) => {
     ctx.db.person.insert({ name, owner: ctx.sender, createdAt: ctx.timestamp });
+  }
+);
+
+// Retention email capture (landing-page signup, or added later in-game).
+// Upserts one row per identity -- the most recent submission wins. Loose
+// validation only: this is a mailing list, not an auth factor.
+export const setPlayerEmail = spacetimedb.reducer(
+  { email: t.string(), source: t.string(), optedIn: t.bool() },
+  (ctx, { email, source, optedIn }) => {
+    const trimmed = email.trim().slice(0, 254);
+    const at = trimmed.indexOf('@');
+    const dot = trimmed.indexOf('.', at + 2);
+    if (at < 1 || dot < 0 || dot === trimmed.length - 1 || /\s/.test(trimmed)) {
+      throw new SenderError("That doesn't look like an email address.");
+    }
+    const row = {
+      owner: ctx.sender,
+      email: trimmed,
+      source: (source || 'unknown').slice(0, 40),
+      optedIn,
+      updatedAt: ctx.timestamp,
+    };
+    if (ctx.db.player_email.owner.find(ctx.sender)) {
+      ctx.db.player_email.owner.update(row);
+    } else {
+      ctx.db.player_email.insert(row);
+    }
   }
 );
 

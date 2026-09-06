@@ -4,7 +4,7 @@
 // as the canvas visuals). One short WebAudio "blip" when a creature eats food.
 //
 // Browsers block audio until a user gesture, so `unlockSfx()` must run from
-// inside a real click/tap handler once (the FirstLoadOverlay dismiss does it).
+// inside a real click/tap handler once (WorldView unlocks on first gesture).
 // Mute state persists in localStorage so it survives reloads.
 
 const MUTE_KEY = 'prompt-wars-sfx-muted';

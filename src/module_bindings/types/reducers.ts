@@ -14,6 +14,7 @@ import SetBiomeMultipliersReducer from "../set_biome_multipliers_reducer";
 import SetFoodConfigReducer from "../set_food_config_reducer";
 import SetGridSizeReducer from "../set_grid_size_reducer";
 import SetLlmKeyReducer from "../set_llm_key_reducer";
+import SetPlayerEmailReducer from "../set_player_email_reducer";
 import SetPopulationCapReducer from "../set_population_cap_reducer";
 import SetPopulationFloorReducer from "../set_population_floor_reducer";
 import SetPowerupConfigReducer from "../set_powerup_config_reducer";
@@ -28,6 +29,7 @@ export type SetBiomeMultipliersParams = __Infer<typeof SetBiomeMultipliersReduce
 export type SetFoodConfigParams = __Infer<typeof SetFoodConfigReducer>;
 export type SetGridSizeParams = __Infer<typeof SetGridSizeReducer>;
 export type SetLlmKeyParams = __Infer<typeof SetLlmKeyReducer>;
+export type SetPlayerEmailParams = __Infer<typeof SetPlayerEmailReducer>;
 export type SetPopulationCapParams = __Infer<typeof SetPopulationCapReducer>;
 export type SetPopulationFloorParams = __Infer<typeof SetPopulationFloorReducer>;
 export type SetPowerupConfigParams = __Infer<typeof SetPowerupConfigReducer>;

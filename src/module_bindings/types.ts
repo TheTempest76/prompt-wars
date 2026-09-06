@@ -74,6 +74,15 @@ export const Person = __t.object("Person", {
 });
 export type Person = __Infer<typeof Person>;
 
+export const PlayerEmail = __t.object("PlayerEmail", {
+  owner: __t.identity(),
+  email: __t.string(),
+  source: __t.string(),
+  optedIn: __t.bool(),
+  updatedAt: __t.timestamp(),
+});
+export type PlayerEmail = __Infer<typeof PlayerEmail>;
+
 export const Powerup = __t.object("Powerup", {
   id: __t.u64(),
   x: __t.u32(),
