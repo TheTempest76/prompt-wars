@@ -64,6 +64,30 @@ const DEFAULT_MIN_POPULATION = 20;
 const DEFAULT_RESTOCK_AMOUNT = 10;
 const RESTOCK_STARTING_ENERGY = 75;
 
+// Restock/rebalance draws from this fixed pool instead of cloning a random
+// survivor -- cloning turns whatever's currently dominant into a monoculture
+// (a world of nothing but butterflies). Deliberately spread across sizes 2-9
+// and temperaments so a top-up adds visible variety.
+const RESTOCK_VARIETY: ReadonlyArray<{
+  glyph: string;
+  color: string;
+  seeksFood: boolean;
+  fleesLarger: boolean;
+  aggression: number;
+  size: number;
+}> = [
+  { glyph: '🐜', color: '#8a5a2b', seeksFood: true, fleesLarger: true, aggression: 2, size: 2 },
+  { glyph: '🦐', color: '#e0836a', seeksFood: true, fleesLarger: true, aggression: 2, size: 2 },
+  { glyph: '🐛', color: '#7bbf5a', seeksFood: true, fleesLarger: true, aggression: 1, size: 3 },
+  { glyph: '🦗', color: '#5a8a3a', seeksFood: true, fleesLarger: true, aggression: 3, size: 4 },
+  { glyph: '🦎', color: '#5aa83a', seeksFood: true, fleesLarger: false, aggression: 6, size: 4 },
+  { glyph: '🦀', color: '#c66b3a', seeksFood: true, fleesLarger: false, aggression: 7, size: 5 },
+  { glyph: '🦂', color: '#c2452b', seeksFood: true, fleesLarger: false, aggression: 9, size: 5 },
+  { glyph: '🦑', color: '#3a6fa8', seeksFood: true, fleesLarger: false, aggression: 4, size: 6 },
+  { glyph: '🐙', color: '#7b3aa8', seeksFood: true, fleesLarger: false, aggression: 5, size: 7 },
+  { glyph: '🐢', color: '#3a7d4a', seeksFood: true, fleesLarger: true, aggression: 1, size: 9 },
+];
+
 // Player-dropped food: each visitor gets PLAYER_FOOD_PER_WINDOW placements,
 // and the allowance refills PLAYER_FOOD_WINDOW_MICROS after the first drop of
 // a batch (a rolling window per identity, tracked in food_grant).
@@ -837,6 +861,71 @@ export const setPopulationFloor = spacetimedb.reducer(
   }
 );
 
+// One-shot cleanup for a world that has gone monoculture (e.g. all
+// butterflies): halve whatever glyph currently dominates, trim the rest down
+// to minPopulation, then refill back up to minPopulation from RESTOCK_VARIETY
+// so what remains is a spread of sizes and kinds. Predators are left alone.
+// CLI: `spacetime call prompt-wars rebalance_creatures --server <env>`.
+export const rebalanceCreatures = spacetimedb.reducer(ctx => {
+  const state = ctx.db.world_config.id.find(0n);
+  if (!state) return;
+  const rng = makeRng(state.rngSeed);
+  const target = state.minPopulation;
+
+  const all = [...ctx.db.creature.iter()].filter(c => !c.isPredator);
+  const counts = new Map<string, number>();
+  for (const c of all) counts.set(c.glyph, (counts.get(c.glyph) ?? 0) + 1);
+  let domGlyph = '';
+  let domN = 0;
+  for (const [g, n] of counts) if (n > domN) [domGlyph, domN] = [g, n];
+
+  // Remove half of the dominant glyph, oldest (lowest id) first.
+  const dom = all.filter(c => c.glyph === domGlyph).sort((a, b) => (a.id < b.id ? -1 : 1));
+  for (let i = 0; i < Math.floor(dom.length / 2); i++) ctx.db.creature.id.delete(dom[i].id);
+
+  // Trim survivors down to the threshold, oldest first.
+  const live = [...ctx.db.creature.iter()]
+    .filter(c => !c.isPredator)
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+  let count = live.length;
+  for (let i = 0; count > target && i < live.length; i++) {
+    ctx.db.creature.id.delete(live[i].id);
+    count--;
+  }
+
+  // Refill up to the threshold with varied creatures.
+  const added = Math.max(0, target - count);
+  for (let i = 0; i < added; i++) {
+    const v = RESTOCK_VARIETY[rng.int(RESTOCK_VARIETY.length)];
+    const jitter = 1 + (rng.next() * 2 - 1) * MUTATION_RANGE;
+    ctx.db.creature.insert({
+      id: 0n,
+      x: rng.int(state.gridSize),
+      y: rng.int(state.gridSize),
+      energy: RESTOCK_STARTING_ENERGY,
+      size: clamp(v.size * jitter, MIN_SIZE, MAX_SIZE),
+      glyph: v.glyph,
+      color: v.color,
+      seeksFood: v.seeksFood,
+      fleesLarger: v.fleesLarger,
+      aggression: v.aggression,
+      prompt: '(rebalance)',
+      isPredator: false,
+      kills: 0,
+      owner: undefined,
+      ...NO_EFFECTS,
+    });
+  }
+
+  ctx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
+  ctx.db.event_log.insert({
+    id: 0n,
+    tickNumber: state.tickCount,
+    message: `Rebalanced: cut the ${domGlyph || '?'} monoculture, seeded ${added} varied creatures`,
+    at: ctx.timestamp,
+  });
+});
+
 // Powerup tuning, live: `spacetime call prompt-wars set_powerup_config 2 30 60
 // --server <env>` (cap, spawn-every-N-ticks, despawn-after-N-ticks). Set cap
 // to 0 to switch powerups off.
@@ -1389,31 +1478,29 @@ export const tick = spacetimedb.reducer(
     }
 
     // Population floor: if the world has thinned past minPopulation, top it
-    // back up so it can't spiral to zero unattended. Each restocked creature
-    // echoes a random survivor's lineage (glyph/colour/behaviour) with a
-    // small size mutation -- a world that found a working niche repopulates
-    // with more of it -- and starts well-fed so the top-up actually takes.
-    // With no survivors at all it falls back to plain defaults, so the world
-    // always recovers even from a total wipe.
+    // back up so it can't spiral to zero unattended. Restocked creatures are
+    // drawn from RESTOCK_VARIETY (a spread of sizes and temperaments), NOT
+    // cloned from a random survivor -- cloning just amplifies whatever's
+    // already dominant into a monoculture. They start well-fed so the top-up
+    // actually takes.
     if (population < state.minPopulation && population < state.populationCap) {
-      const survivors = [...ctx.db.creature.iter()].filter(c => !c.isPredator);
       const want = Math.min(state.restockAmount, state.populationCap - population);
       const before = population;
       for (let i = 0; i < want; i++) {
-        const parent = survivors.length > 0 ? survivors[rng.int(survivors.length)] : undefined;
-        const mutation = 1 + (rng.next() * 2 - 1) * MUTATION_RANGE;
+        const v = RESTOCK_VARIETY[rng.int(RESTOCK_VARIETY.length)];
+        const jitter = 1 + (rng.next() * 2 - 1) * MUTATION_RANGE;
         ctx.db.creature.insert({
           id: 0n,
           x: rng.int(state.gridSize),
           y: rng.int(state.gridSize),
           energy: RESTOCK_STARTING_ENERGY,
-          size: parent ? clamp(parent.size * mutation, MIN_SIZE, MAX_SIZE) : STARTING_SIZE,
-          glyph: parent ? parent.glyph : DEFAULT_CREATURE_PARAMS.glyph,
-          color: parent ? parent.color : DEFAULT_CREATURE_PARAMS.color,
-          seeksFood: parent ? parent.seeksFood : DEFAULT_CREATURE_PARAMS.seeksFood,
-          fleesLarger: parent ? parent.fleesLarger : DEFAULT_CREATURE_PARAMS.fleesLarger,
-          aggression: parent ? parent.aggression : DEFAULT_CREATURE_PARAMS.aggression,
-          prompt: parent ? parent.prompt : '(restock)',
+          size: clamp(v.size * jitter, MIN_SIZE, MAX_SIZE),
+          glyph: v.glyph,
+          color: v.color,
+          seeksFood: v.seeksFood,
+          fleesLarger: v.fleesLarger,
+          aggression: v.aggression,
+          prompt: '(restock)',
           isPredator: false,
           kills: 0,
           owner: undefined,
@@ -1422,7 +1509,7 @@ export const tick = spacetimedb.reducer(
         population++;
       }
       if (population > before) {
-        logs.push(`Population fell to ${before} -- restocked ${population - before} creatures`);
+        logs.push(`Population fell to ${before} -- restocked ${population - before} varied creatures`);
       }
     }
 

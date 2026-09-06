@@ -72,24 +72,63 @@ function Globe() {
   );
 }
 
-const CARDS = [
+const STEPS: { title: string; body: React.ReactNode }[] = [
   {
-    accent: '#2f7d5b',
-    title: 'Write a prompt',
-    body: 'Describe a creature in one sentence. An LLM compiles it into a glyph, a temperament, and a habitat.',
-    bubble: '“a tiny aggressive hunter”',
+    title: 'Sign in',
+    body: (
+      <>
+        Type a name and hit <b>Sign</b>. Your initials tag every creature you spawn,
+        so you can pick yours out of the world.
+      </>
+    ),
   },
   {
-    accent: '#3f7fae',
-    title: 'Watch it live',
-    body: 'It joins a canvas of everyone else’s — hunting food, fleeing predators, growing with every meal.',
-    bubble: null,
+    title: 'Spawn a creature',
+    body: (
+      <>
+        Type it into the prompt box — e.g. <span className="lp-kbd">a tiny aggressive hunter</span> —
+        and hit <b>Spawn</b>. An LLM turns your words into a living organism and the
+        view jumps straight to it.
+      </>
+    ),
   },
   {
-    accent: '#c07a3a',
-    title: 'It persists',
-    body: 'The world keeps evolving even when you’re gone. Come back to a petri dish that moved on without you.',
-    bubble: null,
+    title: 'Feed it and steer it',
+    body: (
+      <>
+        Hit the <b>Place food</b> button, then tap the map to drop a morsel. Your
+        creature moves toward food on its own — drop food to lead it wherever you want.
+        Drag to pan, pinch or <b>+ / −</b> to zoom, and hit the <b>⤢</b> arrows button
+        at the top-right of the canvas for full screen.
+      </>
+    ),
+  },
+  {
+    title: 'Grab powerups',
+    body: (
+      <>
+        Tap a glowing star near your creature (or press <b>P</b>) to transmute it,
+        speed-boost, clone it, and more.
+      </>
+    ),
+  },
+  {
+    title: 'Be the apex predator of this ecosystem',
+    body: (
+      <>
+        Bigger creatures eat smaller ones. Feed yours, stack powerups, and clone it —
+        grow it large and aggressive enough to dominate the whole dish.
+      </>
+    ),
+  },
+  {
+    title: 'Leave whenever',
+    body: (
+      <>
+        The world keeps ticking without you — creatures eat, grow, reproduce and die
+        24/7. Come back to see how it changed.
+      </>
+    ),
   },
 ];
 
@@ -203,41 +242,65 @@ export function Landing() {
           cursor: pointer;
         }
         .lp-cta:hover { filter: brightness(1.06); }
-        .lp-cards {
-          display: grid;
-          grid-template-columns: 1fr;
-          gap: 1rem;
-          margin: 1rem 0 3rem;
+
+        .lp-section-title {
+          font-size: 0.78rem;
+          font-weight: 700;
+          letter-spacing: 0.09em;
+          text-transform: uppercase;
+          color: #6f776f;
+          margin: 0 0 0.9rem;
         }
-        @media (min-width: 48rem) {
-          .lp-cards { grid-template-columns: repeat(3, 1fr); }
-        }
-        .lp-card {
+
+        /* Email capture -- sits right under the hero */
+        .lp-email {
           background: #11161c;
           border: 1px solid #232a31;
           border-radius: 12px;
-          padding: 1.25rem;
+          padding: 1.1rem 1.25rem;
+          margin: 0 0 2.5rem;
         }
-        .lp-card h3 { margin: 0.6rem 0 0.35rem; font-size: 1.02rem; }
-        .lp-card p { margin: 0; color: #8a938c; font-size: 0.9rem; line-height: 1.55; }
-        .lp-dot { width: 0.7rem; height: 0.7rem; border-radius: 50%; display: inline-block; }
-        .lp-bubble {
-          margin-top: 0.8rem;
-          display: inline-block;
-          background: rgba(255,255,255,0.04);
+        .lp-form { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+        /* How-to-play steps */
+        .lp-steps { list-style: none; margin: 0 0 2.75rem; padding: 0; display: grid; gap: 0.75rem; }
+        .lp-step {
+          display: grid;
+          grid-template-columns: 2rem 1fr;
+          gap: 0.85rem;
+          align-items: start;
+          background: #11161c;
           border: 1px solid #232a31;
-          border-radius: 999px;
-          padding: 0.3rem 0.7rem;
-          font-size: 0.82rem;
+          border-radius: 12px;
+          padding: 1rem 1.15rem;
+        }
+        .lp-step-num {
+          width: 2rem; height: 2rem;
+          border-radius: 50%;
+          display: grid; place-items: center;
+          background: rgba(55,217,154,0.14);
+          color: #37d99a;
+          font-weight: 700;
+          font-size: 0.95rem;
+        }
+        .lp-step h3 { margin: 0.15rem 0 0.3rem; font-size: 1rem; }
+        .lp-step p { margin: 0; color: #a2aaa2; font-size: 0.92rem; line-height: 1.6; }
+        .lp-step b { color: #e6e4dd; }
+        .lp-kbd {
+          background: rgba(255,255,255,0.05);
+          border: 1px solid #2c343c;
+          border-radius: 6px;
+          padding: 0.05rem 0.4rem;
+          font-size: 0.86em;
           color: #cfd4cc;
         }
+
         .lp-foot {
           width: 100%;
           border-top: 1px solid #232a31;
-          padding-top: 2rem;
+          padding-top: 1.5rem;
+          text-align: center;
         }
-        .lp-foot h3 { margin: 0 0 0.75rem; font-size: 1rem; }
-        .lp-form { display: flex; flex-wrap: wrap; gap: 0.5rem; }
         .lp-input {
           flex: 1 1 16rem;
           min-width: 0;
@@ -287,65 +350,75 @@ export function Landing() {
           </div>
         </section>
 
-        <section className="lp-cards">
-          {CARDS.map(c => (
-            <div className="lp-card" key={c.title}>
-              <span className="lp-dot" style={{ background: c.accent }} />
-              <h3>{c.title}</h3>
-              <p>{c.body}</p>
-              {c.bubble && <span className="lp-bubble">{c.bubble}</span>}
-            </div>
-          ))}
-        </section>
-
-        <footer className="lp-foot">
-          <h3>Stay updated on your creatures</h3>
+        <section className="lp-email">
+          <p className="lp-section-title">Stay updated on your creatures</p>
           {emailState === 'done' ? (
-            <p className="lp-note" style={{ color: '#37d99a' }}>
+            <p className="lp-note" style={{ color: '#37d99a', marginTop: 0 }}>
               Check your inbox (or spam folder).
             </p>
           ) : (
-            <form className="lp-form" onSubmit={submitEmail}>
-              <input
-                className="lp-input"
-                type="email"
-                inputMode="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                aria-label="Email address"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-              />
-              <button
-                className="lp-submit"
-                type="submit"
-                disabled={!email.trim() || emailState === 'sending'}
-              >
-                {emailState === 'sending' ? 'Signing up…' : 'Sign me up'}
-              </button>
-            </form>
+            <>
+              <form className="lp-form" onSubmit={submitEmail}>
+                <input
+                  className="lp-input"
+                  type="email"
+                  inputMode="email"
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  aria-label="Email address"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                />
+                <button
+                  className="lp-submit"
+                  type="submit"
+                  disabled={!email.trim() || emailState === 'sending'}
+                >
+                  {emailState === 'sending' ? 'Signing up…' : 'Sign me up'}
+                </button>
+              </form>
+              <label className="lp-check">
+                <input
+                  type="checkbox"
+                  checked={updates}
+                  onChange={e => setUpdates(e.target.checked)}
+                  style={{ marginTop: '0.15rem' }}
+                />
+                Send me updates when my creatures reproduce or use powerups.
+              </label>
+              {emailErr && (
+                <p className="lp-note" style={{ color: '#d9776a' }}>
+                  {emailErr}
+                </p>
+              )}
+              <p className="lp-note" style={{ color: '#6f776f' }}>
+                Optional — <b>Enter the petri dish</b> lets you in either way.
+              </p>
+            </>
           )}
+        </section>
 
-          {emailState !== 'done' && (
-            <label className="lp-check">
-              <input
-                type="checkbox"
-                checked={updates}
-                onChange={e => setUpdates(e.target.checked)}
-                style={{ marginTop: '0.15rem' }}
-              />
-              Send me updates when my creatures reproduce or use powerups.
-            </label>
-          )}
-          {emailErr && (
-            <p className="lp-note" style={{ color: '#d9776a' }}>
-              {emailErr}
-            </p>
-          )}
-          <p className="lp-note" style={{ color: '#6f776f' }}>
-            Optional — the button above lets you in either way.
-          </p>
+        <section>
+          <p className="lp-section-title">How to play</p>
+          <ol className="lp-steps">
+            {STEPS.map((s, i) => (
+              <li className="lp-step" key={s.title}>
+                <span className="lp-step-num">{i + 1}</span>
+                <div>
+                  <h3>{s.title}</h3>
+                  <p>{s.body}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+          <div style={{ textAlign: 'center', marginBottom: '2.5rem' }}>
+            <button className="lp-cta" onClick={enter}>
+              Enter the petri dish
+            </button>
+          </div>
+        </section>
 
+        <footer className="lp-foot">
           <p className="lp-links">
             <a href="https://x.com" target="_blank" rel="noreferrer">
               Twitter

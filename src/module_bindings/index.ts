@@ -36,6 +36,7 @@ import {
 // Import all reducer arg schemas
 import AddReducer from "./add_reducer";
 import PlaceFoodReducer from "./place_food_reducer";
+import RebalanceCreaturesReducer from "./rebalance_creatures_reducer";
 import RegenerateTerrainReducer from "./regenerate_terrain_reducer";
 import SayHelloReducer from "./say_hello_reducer";
 import SetBiomeMultipliersReducer from "./set_biome_multipliers_reducer";
@@ -157,6 +158,7 @@ const tablesSchema = __schema({
 const reducersSchema = __reducers(
   __reducerSchema("add", AddReducer),
   __reducerSchema("place_food", PlaceFoodReducer),
+  __reducerSchema("rebalance_creatures", RebalanceCreaturesReducer),
   __reducerSchema("regenerate_terrain", RegenerateTerrainReducer),
   __reducerSchema("say_hello", SayHelloReducer),
   __reducerSchema("set_biome_multipliers", SetBiomeMultipliersReducer),
