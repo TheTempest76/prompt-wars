@@ -2,6 +2,7 @@ import { PersonList } from './PersonList';
 import { WorldView } from './WorldView';
 import { SpawnCreature } from './SpawnCreature';
 import { FirstLoadOverlay } from './FirstLoadOverlay';
+import { Toasts } from './Toasts';
 import { fetchPeople } from '../lib/spacetimedb-server';
 
 // fetchPeople has its own 10s internal timeout; give the Vercel serverless
@@ -42,6 +43,7 @@ export default async function Home() {
       <PersonList initialPeople={initialPeople} />
       <SpawnCreature />
       <WorldView />
+      <Toasts />
     </main>
   );
 }

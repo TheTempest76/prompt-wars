@@ -1,5 +1,5 @@
 import { schema, table, t, SenderError } from 'spacetimedb/server';
-import { ScheduleAt, TimeDuration, Timestamp } from 'spacetimedb';
+import { ScheduleAt, TimeDuration, Timestamp, Identity } from 'spacetimedb';
 
 // See CLAUDE.md "This project's decisions".
 const TICK_INTERVAL_MICROS = 2_000_000n; // 2 seconds
@@ -70,8 +70,39 @@ const RESTOCK_STARTING_ENERGY = 75;
 const PLAYER_FOOD_PER_WINDOW = 10;
 const PLAYER_FOOD_WINDOW_MICROS = 150n * 1_000_000n; // 2.5 minutes
 
+// --- Powerups -------------------------------------------------------------
+// Rare, desirable, non-essential. Five kinds, index = powerup.kind:
+//   0 transmute     -- reroll the creature's traits/glyph/colour (one-time)
+//   1 speed_burst   -- 2x movement for SPEED_BURST_TICKS
+//   2 energy_surge  -- +ENERGY_SURGE_BONUS now, then 1.5x burn for a while
+//   3 clone         -- exact free duplicate (counts toward pop cap)
+//   4 hunger_zero   -- ignores food, wanders, for HUNGER_ZERO_TICKS
+const POWERUP_KIND_COUNT = 5;
+const POWERUP_LABELS = ['Transmute', 'Speed Burst', 'Energy Surge', 'Clone', 'Hunger Zero'];
+const SPEED_BURST_TICKS = 20n;
+const ENERGY_SURGE_TICKS = 15n;
+const ENERGY_SURGE_BONUS = 50;
+const ENERGY_SURGE_BURN_MULT = 1.5;
+const HUNGER_ZERO_TICKS = 25n;
+const TRANSMUTE_RESET_ENERGY = 50;
+const POWERUP_CLAIM_RADIUS = 60; // cells: your nearest creature must be this close to claim
+// Spread into every fresh creature.insert -- .default() columns still have to
+// be supplied explicitly. A newborn/seed/predator has no active powerup.
+const NO_EFFECTS = { speedUntilTick: 0n, surgeUntilTick: 0n, hungerZeroUntilTick: 0n } as const;
+const DEFAULT_POWERUP_CAP = 2;
+const DEFAULT_POWERUP_SPAWN_EVERY_TICKS = 30; // ~60s at a 2s tick
+const DEFAULT_POWERUP_DESPAWN_TICKS = 60; // ~120s at a 2s tick
+
 const FLEE_RADIUS = 15; // cells — how far a fleesLarger creature scans for a threat. Scaled with GRID_SIZE (was 4 at grid 80, same ~5% proportion) -- a fixed radius on a much bigger grid would almost never see anything
 const FLEE_SIZE_MARGIN = 1.2; // a creature counts as "larger" above this multiple
+
+// Cross-species predation between ordinary creatures (separate from the
+// world predator): a much bigger, not-timid creature that ends its move
+// touching a smaller one eats it. The size bar sits ABOVE the flee bar, so a
+// creature that flees at 1.2x actually gains ground before it's edible.
+const CANNIBAL_SIZE_RATIO = 1.5;
+const CANNIBAL_MIN_AGGRESSION = 3; // timid creatures don't hunt their own kind
+const ENERGY_FROM_PREY = 25;
 const AGGRESSION_ENERGY_SCALE = 0.05; // per aggression point: burn/gain more, both ways
 
 // Predators: world-spawned, never player-authored -- no owner, no prompt
@@ -135,6 +166,23 @@ function makeRng(seed: bigint) {
 
 function manhattan(ax: number, ay: number, bx: number, by: number): number {
   return Math.abs(ax - bx) + Math.abs(ay - by);
+}
+
+// The world is a torus -- walk off one edge, come back on the opposite one,
+// so creatures never pile up against a wall (a "circular queue" grid). These
+// three helpers are what make distance and heading wrap.
+function wrapCoord(v: number, size: number): number {
+  return ((v % size) + size) % size;
+}
+// Signed shortest step from `from` to `to` on a wrapped axis of length `size`.
+function torusDelta(from: number, to: number, size: number): number {
+  let d = to - from;
+  if (d > size / 2) d -= size;
+  else if (d < -size / 2) d += size;
+  return d;
+}
+function torusManhattan(ax: number, ay: number, bx: number, by: number, size: number): number {
+  return Math.abs(torusDelta(ax, bx, size)) + Math.abs(torusDelta(ay, by, size));
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -412,6 +460,24 @@ function describeCreatureParams(params: CreatureParams, habitatBiome: number): s
   return parts.join(', ') + '.';
 }
 
+// "Lineage name" for event-log lines about a player's creature: the latest
+// name that creature's owning identity signed in the guestbook, else a
+// #id fallback. Takes a plain snapshot array so it works from both a
+// reducer and a procedure context without a typed-ctx parameter.
+type PersonSnapshot = { name: string; owner?: Identity; createdAt: Timestamp };
+function lineageName(people: PersonSnapshot[], owner: Identity | undefined, fallbackId: bigint): string {
+  if (owner) {
+    let best: { name: string; at: bigint } | undefined;
+    for (const p of people) {
+      if (!p.owner || !p.owner.equals(owner)) continue;
+      const at = p.createdAt.microsSinceUnixEpoch;
+      if (!best || at > best.at) best = { name: p.name.trim(), at };
+    }
+    if (best && best.name.length > 0) return best.name;
+  }
+  return `Creature #${fallbackId}`;
+}
+
 const CREATURE_COMPILE_SYSTEM_PROMPT = `You compile a one-sentence creature description into fixed-shape JSON game parameters for a small ecosystem simulation.
 Output ONLY a single JSON object, no prose, no markdown fences, matching exactly this shape:
 {
@@ -478,6 +544,10 @@ const world_config = table(
     // as the columns above. Retunable live via setPopulationFloor.
     minPopulation: t.u32().default(DEFAULT_MIN_POPULATION),
     restockAmount: t.u32().default(DEFAULT_RESTOCK_AMOUNT),
+    // Powerups -- retunable via setPowerupConfig.
+    powerupCap: t.u32().default(DEFAULT_POWERUP_CAP),
+    powerupSpawnEveryTicks: t.u32().default(DEFAULT_POWERUP_SPAWN_EVERY_TICKS),
+    powerupDespawnTicks: t.u32().default(DEFAULT_POWERUP_DESPAWN_TICKS),
   }
 );
 
@@ -532,6 +602,26 @@ const creature = table(
     // -- a reproduced child inherits its parent's owner, so a whole lineage
     // stays tagged to whoever originally spawned it.
     owner: t.option(t.identity()).default(undefined),
+    // Powerup effect timers -- 0n means "no effect". Each holds the tick
+    // number the effect lapses on; `tick` reads them, applies the modifier
+    // while active, and clears+logs on expiry. Appended with defaults so
+    // this migrates onto a live world.
+    speedUntilTick: t.u64().default(0n),
+    surgeUntilTick: t.u64().default(0n),
+    hungerZeroUntilTick: t.u64().default(0n),
+  }
+);
+
+// Powerups: rare pickups a player claims onto their nearest creature. Spawn
+// / despawn cadence + cap live on world_config (tunable via setPowerupConfig).
+const powerup = table(
+  { public: true },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    x: t.u32(),
+    y: t.u32(),
+    kind: t.u8(), // 0 transmute, 1 speed_burst, 2 energy_surge, 3 clone, 4 hunger_zero
+    spawnedAtTick: t.u64(),
   }
 );
 
@@ -589,6 +679,7 @@ const spacetimedb = schema({
   creature,
   food,
   food_grant,
+  powerup,
   event_log,
   llm_secret,
   terrain,
@@ -610,6 +701,7 @@ export const init = spacetimedb.init(ctx => {
       isPredator: false,
       kills: 0,
       owner: undefined,
+      ...NO_EFFECTS,
     });
   }
   for (let i = 0; i < INITIAL_FOOD_COUNT; i++) {
@@ -633,6 +725,9 @@ export const init = spacetimedb.init(ctx => {
     tickIntervalMicros: TICK_INTERVAL_MICROS,
     minPopulation: DEFAULT_MIN_POPULATION,
     restockAmount: DEFAULT_RESTOCK_AMOUNT,
+    powerupCap: DEFAULT_POWERUP_CAP,
+    powerupSpawnEveryTicks: DEFAULT_POWERUP_SPAWN_EVERY_TICKS,
+    powerupDespawnTicks: DEFAULT_POWERUP_DESPAWN_TICKS,
     rngSeed: rng.seed(),
     tickCount: 0n,
     lastTickAt: ctx.timestamp,
@@ -697,6 +792,23 @@ export const setPopulationFloor = spacetimedb.reducer(
     const state = ctx.db.world_config.id.find(0n);
     if (!state) return;
     ctx.db.world_config.id.update({ ...state, minPopulation: minPop, restockAmount: restock });
+  }
+);
+
+// Powerup tuning, live: `spacetime call prompt-wars set_powerup_config 2 30 60
+// --server <env>` (cap, spawn-every-N-ticks, despawn-after-N-ticks). Set cap
+// to 0 to switch powerups off.
+export const setPowerupConfig = spacetimedb.reducer(
+  { cap: t.u32(), spawnEveryTicks: t.u32(), despawnTicks: t.u32() },
+  (ctx, { cap, spawnEveryTicks, despawnTicks }) => {
+    const state = ctx.db.world_config.id.find(0n);
+    if (!state) return;
+    ctx.db.world_config.id.update({
+      ...state,
+      powerupCap: cap,
+      powerupSpawnEveryTicks: spawnEveryTicks,
+      powerupDespawnTicks: despawnTicks,
+    });
   }
 );
 
@@ -857,6 +969,7 @@ export const spawnPredator = spacetimedb.reducer(ctx => {
     isPredator: true,
     kills: 0,
     owner: undefined,
+    ...NO_EFFECTS,
   });
   ctx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
   ctx.db.event_log.insert({
@@ -882,6 +995,12 @@ export const tick = spacetimedb.reducer(
     const foodByCell = new Map<string, { id: bigint; x: number; y: number; kind: number }>();
     for (const f of ctx.db.food.iter())
       foodByCell.set(`${f.x},${f.y}`, { id: f.id, x: f.x, y: f.y, kind: f.kind });
+    // Snapshot for lineageName() in powerup-expiry log lines.
+    const people: PersonSnapshot[] = [...ctx.db.person.iter()].map(p => ({
+      name: p.name,
+      owner: p.owner,
+      createdAt: p.createdAt,
+    }));
 
     let population = creatures.length;
     const logs: string[] = [];
@@ -906,7 +1025,7 @@ export const tick = spacetimedb.reducer(
         for (const other of creatures) {
           if (other.id === current.id || other.isPredator) continue;
           if (other.size >= current.size) continue;
-          const d = manhattan(current.x, current.y, other.x, other.y);
+          const d = torusManhattan(current.x, current.y, other.x, other.y, state.gridSize);
           if (d <= PREDATOR_HUNT_RADIUS && d < bestPreyDist) {
             bestPreyDist = d;
             prey = other;
@@ -916,8 +1035,8 @@ export const tick = spacetimedb.reducer(
         let px = current.x;
         let py = current.y;
         if (prey) {
-          const dx = prey.x - px;
-          const dy = prey.y - py;
+          const dx = torusDelta(px, prey.x, state.gridSize);
+          const dy = torusDelta(py, prey.y, state.gridSize);
           if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) px += Math.sign(dx);
           else if (dy !== 0) py += Math.sign(dy);
         } else {
@@ -927,8 +1046,8 @@ export const tick = spacetimedb.reducer(
           else if (dir === 2) py += 1;
           else py -= 1;
         }
-        px = clamp(px, 0, state.gridSize - 1);
-        py = clamp(py, 0, state.gridSize - 1);
+        px = wrapCoord(px, state.gridSize);
+        py = wrapCoord(py, state.gridSize);
 
         const predBiome = biomeAt(terrainCells, state.gridSize, px, py);
         const predBurnMult = multiplierForBiome(
@@ -965,6 +1084,28 @@ export const tick = spacetimedb.reducer(
         continue;
       }
 
+      // 0b. Powerup effects. Each *UntilTick holds the tick the effect ends
+      // on; while active it modifies this tick, and the first tick past it we
+      // clear the timer and log that it wore off.
+      let speedUntilTick = current.speedUntilTick;
+      let surgeUntilTick = current.surgeUntilTick;
+      let hungerZeroUntilTick = current.hungerZeroUntilTick;
+      const speedActive = speedUntilTick > tickNumber;
+      const surgeActive = surgeUntilTick > tickNumber;
+      const hungerZeroActive = hungerZeroUntilTick > tickNumber;
+      if (speedUntilTick !== 0n && tickNumber >= speedUntilTick) {
+        speedUntilTick = 0n;
+        logs.push(`→ ${lineageName(people, current.owner, current.id)}'s Speed Burst wore off`);
+      }
+      if (surgeUntilTick !== 0n && tickNumber >= surgeUntilTick) {
+        surgeUntilTick = 0n;
+        logs.push(`→ ${lineageName(people, current.owner, current.id)}'s Energy Surge wore off`);
+      }
+      if (hungerZeroUntilTick !== 0n && tickNumber >= hungerZeroUntilTick) {
+        hungerZeroUntilTick = 0n;
+        logs.push(`→ ${lineageName(people, current.owner, current.id)} left its Hunger Zero rest`);
+      }
+
       // 1. fleesLarger creatures scan for a nearby bigger threat first —
       // fleeing overrides feeding this tick. Otherwise seekers find the
       // nearest food. Both bounded by populationCap/foodCap (hard-capped),
@@ -976,7 +1117,7 @@ export const tick = spacetimedb.reducer(
         for (const other of creatures) {
           if (other.id === current.id) continue;
           if (other.size <= current.size * FLEE_SIZE_MARGIN) continue;
-          const d = manhattan(current.x, current.y, other.x, other.y);
+          const d = torusManhattan(current.x, current.y, other.x, other.y, state.gridSize);
           if (d <= FLEE_RADIUS && d < bestThreatDist) {
             bestThreatDist = d;
             fleeFrom = other;
@@ -985,10 +1126,11 @@ export const tick = spacetimedb.reducer(
       }
 
       let target: { x: number; y: number } | undefined;
-      if (!fleeFrom && current.seeksFood) {
+      // Hunger Zero: ignore food entirely, just wander (a "rest" state).
+      if (!fleeFrom && current.seeksFood && !hungerZeroActive) {
         let bestDist = Infinity;
         for (const f of foodByCell.values()) {
-          const d = manhattan(current.x, current.y, f.x, f.y);
+          const d = torusManhattan(current.x, current.y, f.x, f.y, state.gridSize);
           if (d < bestDist) {
             bestDist = d;
             target = f;
@@ -996,30 +1138,34 @@ export const tick = spacetimedb.reducer(
         }
       }
 
-      // 2. Move one cell toward the food target, away from a threat, or a
-      // random step if neither applies (greedy either way, no pathfinding).
+      // 2. Move toward the food target, away from a threat, or a random step
+      // if neither applies (greedy either way, no pathfinding). Speed Burst
+      // takes two steps instead of one.
       let x = current.x;
       let y = current.y;
-      if (fleeFrom) {
-        const dx = x - fleeFrom.x;
-        const dy = y - fleeFrom.y;
-        if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) x += Math.sign(dx);
-        else if (dy !== 0) y += Math.sign(dy);
-        else x += rng.int(2) === 0 ? 1 : -1; // directly on top of the threat
-      } else if (target) {
-        const dx = target.x - x;
-        const dy = target.y - y;
-        if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) x += Math.sign(dx);
-        else if (dy !== 0) y += Math.sign(dy);
-      } else {
-        const dir = rng.int(4);
-        if (dir === 0) x += 1;
-        else if (dir === 1) x -= 1;
-        else if (dir === 2) y += 1;
-        else y -= 1;
+      const steps = speedActive ? 2 : 1;
+      for (let s = 0; s < steps; s++) {
+        if (fleeFrom) {
+          const dx = torusDelta(fleeFrom.x, x, state.gridSize); // heading away from the threat
+          const dy = torusDelta(fleeFrom.y, y, state.gridSize);
+          if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) x += Math.sign(dx);
+          else if (dy !== 0) y += Math.sign(dy);
+          else x += rng.int(2) === 0 ? 1 : -1; // directly on top of the threat
+        } else if (target) {
+          const dx = torusDelta(x, target.x, state.gridSize);
+          const dy = torusDelta(y, target.y, state.gridSize);
+          if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) x += Math.sign(dx);
+          else if (dy !== 0) y += Math.sign(dy);
+        } else {
+          const dir = rng.int(4);
+          if (dir === 0) x += 1;
+          else if (dir === 1) x -= 1;
+          else if (dir === 2) y += 1;
+          else y -= 1;
+        }
       }
-      x = clamp(x, 0, state.gridSize - 1);
-      y = clamp(y, 0, state.gridSize - 1);
+      x = wrapCoord(x, state.gridSize);
+      y = wrapCoord(y, state.gridSize);
 
       // 3. Eat if standing on food; otherwise burn energy, and shrink if
       // starving. Aggression trades burn rate for gain rate either way —
@@ -1031,7 +1177,8 @@ export const tick = spacetimedb.reducer(
         biomeHere, state.bloomBurnMult, state.coldBurnMult, state.ventBurnMult, state.barrenBurnMult
       );
       const aggressionScale = 1 + current.aggression * AGGRESSION_ENERGY_SCALE;
-      let energy = current.energy - ENERGY_BURN_PER_TICK * aggressionScale * burnMult;
+      const surgeBurn = surgeActive ? ENERGY_SURGE_BURN_MULT : 1;
+      let energy = current.energy - ENERGY_BURN_PER_TICK * aggressionScale * burnMult * surgeBurn;
       let size = current.size;
       const cellKey = `${x},${y}`;
       const eaten = foodByCell.get(cellKey);
@@ -1047,7 +1194,7 @@ export const tick = spacetimedb.reducer(
         let rivalId: bigint | undefined;
         for (const other of creatures) {
           if (other.id === current.id || other.isPredator) continue;
-          if (manhattan(other.x, other.y, x, y) > 1) continue;
+          if (torusManhattan(other.x, other.y, x, y, state.gridSize) > 1) continue;
           if (!ctx.db.creature.id.find(other.id)) continue; // died/eaten already this tick
           const otherScore = contestScore(other);
           if (otherScore > myScore || (otherScore === myScore && other.id < current.id)) {
@@ -1067,6 +1214,24 @@ export const tick = spacetimedb.reducer(
         }
       } else if (energy < STARVING_ENERGY_THRESHOLD) {
         size = Math.max(MIN_SIZE, size - SIZE_SHRINK_PER_TICK);
+      }
+
+      // 3b. Cross-species predation: a much bigger, not-timid creature that
+      // ended its move touching a smaller one eats it (one per tick). A
+      // Hunger Zero creature is resting and doesn't.
+      if (!hungerZeroActive && current.aggression >= CANNIBAL_MIN_AGGRESSION) {
+        for (const other of creatures) {
+          if (other.id === current.id || other.isPredator) continue;
+          if (size < other.size * CANNIBAL_SIZE_RATIO) continue;
+          if (torusManhattan(other.x, other.y, x, y, state.gridSize) > 1) continue;
+          if (!ctx.db.creature.id.find(other.id)) continue; // already gone this tick
+          ctx.db.creature.id.delete(other.id);
+          population--;
+          energy = Math.min(MAX_ENERGY, energy + ENERGY_FROM_PREY);
+          size = Math.min(MAX_SIZE, size + SIZE_GROWTH_PER_MEAL);
+          logs.push(`${lineageName(people, current.owner, current.id)} devoured a smaller creature`);
+          break;
+        }
       }
 
       // 4. Die at zero energy.
@@ -1103,6 +1268,7 @@ export const tick = spacetimedb.reducer(
           isPredator: false,
           kills: 0,
           owner: current.owner,
+          ...NO_EFFECTS,
         });
         population++;
         logs.push(
@@ -1110,7 +1276,16 @@ export const tick = spacetimedb.reducer(
         );
       }
 
-      ctx.db.creature.id.update({ ...current, x, y, energy, size });
+      ctx.db.creature.id.update({
+        ...current,
+        x,
+        y,
+        energy,
+        size,
+        speedUntilTick,
+        surgeUntilTick,
+        hungerZeroUntilTick,
+      });
     }
 
     // Keep food topped up to the cap, biome-weighted: a candidate cell's
@@ -1165,6 +1340,7 @@ export const tick = spacetimedb.reducer(
           isPredator: true,
           kills: 0,
           owner: undefined,
+          ...NO_EFFECTS,
         });
         logs.push('A predator has appeared -- the population outgrew its food supply');
       }
@@ -1199,11 +1375,33 @@ export const tick = spacetimedb.reducer(
           isPredator: false,
           kills: 0,
           owner: undefined,
+          ...NO_EFFECTS,
         });
         population++;
       }
       if (population > before) {
         logs.push(`Population fell to ${before} -- restocked ${population - before} creatures`);
+      }
+    }
+
+    // --- Powerups: despawn stale ones, then maybe spawn a fresh one -------
+    {
+      let active = 0;
+      for (const pu of ctx.db.powerup.iter()) {
+        if (tickNumber - pu.spawnedAtTick >= BigInt(state.powerupDespawnTicks)) {
+          ctx.db.powerup.id.delete(pu.id);
+          logs.push(`✦ A ${POWERUP_LABELS[pu.kind] ?? 'mystery'} powerup faded away`);
+        } else {
+          active++;
+        }
+      }
+      const every = BigInt(Math.max(1, state.powerupSpawnEveryTicks));
+      if (tickNumber % every === 0n && active < state.powerupCap) {
+        const biome = rng.int(BIOME_COUNT);
+        const pos = pickSpawnPosition(rng, terrainCells, state.gridSize, biome);
+        const kind = rng.int(POWERUP_KIND_COUNT);
+        ctx.db.powerup.insert({ id: 0n, x: pos.x, y: pos.y, kind, spawnedAtTick: tickNumber });
+        logs.push(`✦ ${POWERUP_LABELS[kind]} powerup appeared at (${pos.x}, ${pos.y})`);
       }
     }
 
@@ -1330,6 +1528,7 @@ export const spawnFromPrompt = spacetimedb.procedure(
         isPredator: false,
         kills: 0,
         owner: ctx.sender,
+        ...NO_EFFECTS,
       });
       tx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
       return row;
@@ -1342,5 +1541,184 @@ export const spawnFromPrompt = spacetimedb.procedure(
       };
     }
     return { creatureId: child.id, summary: describeCreatureParams(params, habitatBiome) };
+  }
+);
+
+const ClaimResult = t.object('ClaimResult', {
+  ok: t.bool(),
+  message: t.string(),
+});
+
+// Claim a powerup onto the caller's nearest own creature. A procedure (not a
+// reducer) because Transmute needs the LLM compile call; the other four kinds
+// are pure table writes done in ctx.withTx. Targeting + all validation happen
+// server-side against ctx.sender — the client only sends a powerup id.
+export const claimPowerup = spacetimedb.procedure(
+  { powerupId: t.u64() },
+  ClaimResult,
+  (ctx, { powerupId }) => {
+    const setup = ctx.withTx(tx => {
+      const pu = tx.db.powerup.id.find(powerupId);
+      if (!pu) return { error: 'That powerup is already gone.' };
+      const cfg = tx.db.world_config.id.find(0n);
+      const gs = cfg ? cfg.gridSize : 300;
+      const mine = [...tx.db.creature.iter()].filter(
+        c => !c.isPredator && c.owner && c.owner.equals(ctx.sender)
+      );
+      if (mine.length === 0) return { error: 'No creature nearby to claim this powerup.' };
+      let nearest = mine[0];
+      let best = torusManhattan(nearest.x, nearest.y, pu.x, pu.y, gs);
+      for (const c of mine) {
+        const d = torusManhattan(c.x, c.y, pu.x, pu.y, gs);
+        if (d < best) {
+          best = d;
+          nearest = c;
+        }
+      }
+      if (best > POWERUP_CLAIM_RADIUS) {
+        return { error: 'No creature nearby to claim this powerup.' };
+      }
+      const people: PersonSnapshot[] = [...tx.db.person.iter()].map(p => ({
+        name: p.name,
+        owner: p.owner,
+        createdAt: p.createdAt,
+      }));
+      const state = tx.db.world_config.id.find(0n);
+      return {
+        kind: pu.kind,
+        nearestId: nearest.id,
+        name: lineageName(people, nearest.owner, nearest.id),
+        tickNumber: state ? state.tickCount : 0n,
+      };
+    });
+    if ('error' in setup) return { ok: false, message: String(setup.error) };
+
+    const { kind, nearestId, name, tickNumber } = setup;
+    const label = POWERUP_LABELS[kind] ?? 'Powerup';
+
+    // Transmute: reroll traits via the same LLM compile path as spawn. Do the
+    // fetch OUTSIDE any transaction; fall back to a random-ish local reroll if
+    // there's no key or the call fails.
+    let rerolled: CreatureParams | undefined;
+    let rerolledHabitat = -1;
+    if (kind === 0) {
+      const secret = ctx.withTx(tx => tx.db.llm_secret.id.find(0n));
+      if (secret) {
+        try {
+          const res = ctx.http.fetch(GROK_API_URL, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${secret.apiKey}`, 'content-type': 'application/json' },
+            body: JSON.stringify({
+              model: GROK_MODEL,
+              max_tokens: LLM_MAX_TOKENS,
+              reasoning_effort: 'low',
+              messages: [
+                { role: 'system', content: CREATURE_COMPILE_SYSTEM_PROMPT },
+                { role: 'user', content: 'a random creature — surprising, distinct, any habitat' },
+              ],
+            }),
+            timeout: TimeDuration.fromMillis(LLM_TIMEOUT_MILLIS),
+          });
+          if (res.status === 200) {
+            const content = JSON.parse(res.text())?.choices?.[0]?.message?.content;
+            if (typeof content === 'string') {
+              const parsed = JSON.parse(stripJsonFences(content));
+              rerolled = clampCreatureParams(parsed);
+              rerolledHabitat = clampHabitat(parsed);
+            }
+          }
+        } catch {
+          // fall through to the local reroll below
+        }
+      }
+    }
+
+    const result = ctx.withTx(tx => {
+      const pu = tx.db.powerup.id.find(powerupId);
+      if (!pu) return 'That powerup was just taken.';
+      const c = tx.db.creature.id.find(nearestId);
+      if (!c) return 'Your creature is no longer around.';
+      const state = tx.db.world_config.id.find(0n);
+      if (!state) return 'World not ready.';
+      const rng = makeRng(state.rngSeed);
+      tx.db.powerup.id.delete(pu.id);
+
+      const logEvent = (message: string) =>
+        tx.db.event_log.insert({ id: 0n, tickNumber, message, at: ctx.timestamp });
+
+      if (kind === 0) {
+        const next: CreatureParams = rerolled ?? {
+          seeksFood: rng.next() > 0.3,
+          fleesLarger: rng.next() > 0.5,
+          aggression: rng.int(11),
+          glyph: DEFAULT_CREATURE_PARAMS.glyph,
+          color: DEFAULT_CREATURE_PARAMS.color,
+        };
+        const before = describeCreatureParams(
+          {
+            seeksFood: c.seeksFood,
+            fleesLarger: c.fleesLarger,
+            aggression: c.aggression,
+            glyph: c.glyph,
+            color: c.color,
+          },
+          -1
+        );
+        tx.db.creature.id.update({
+          ...c,
+          glyph: next.glyph,
+          color: next.color,
+          seeksFood: next.seeksFood,
+          fleesLarger: next.fleesLarger,
+          aggression: next.aggression,
+          energy: TRANSMUTE_RESET_ENERGY,
+          prompt: '(transmuted) a random creature',
+          speedUntilTick: 0n,
+          surgeUntilTick: 0n,
+          hungerZeroUntilTick: 0n,
+        });
+        tx.db.world_config.id.update({ ...state, rngSeed: rng.seed() });
+        logEvent(`→ ${name} used Transmute! Was: ${before} Now: ${describeCreatureParams(next, rerolledHabitat)}`);
+        return null;
+      }
+
+      if (kind === 1) {
+        tx.db.creature.id.update({ ...c, speedUntilTick: tickNumber + SPEED_BURST_TICKS });
+        logEvent(`→ ${name} gained Speed Burst! Racing for ${SPEED_BURST_TICKS} ticks`);
+        return null;
+      }
+
+      if (kind === 2) {
+        tx.db.creature.id.update({
+          ...c,
+          energy: Math.min(MAX_ENERGY, c.energy + ENERGY_SURGE_BONUS),
+          surgeUntilTick: tickNumber + ENERGY_SURGE_TICKS,
+        });
+        logEvent(`→ ${name} got an Energy Surge! (will starve fast after)`);
+        return null;
+      }
+
+      if (kind === 3) {
+        const living = [...tx.db.creature.iter()];
+        if (living.length >= state.populationCap) {
+          let victim = living[0];
+          for (const other of living) if (other.id < victim.id) victim = other;
+          tx.db.creature.id.delete(victim.id);
+          logEvent(`Creature #${victim.id} starved to make room for a clone`);
+        }
+        const { id: _id, ...rest } = c;
+        tx.db.creature.insert({ ...rest, id: 0n });
+        logEvent(`→ ${name} used Clone! Spawned duplicate`);
+        return null;
+      }
+
+      // kind 4: hunger_zero
+      tx.db.creature.id.update({ ...c, hungerZeroUntilTick: tickNumber + HUNGER_ZERO_TICKS });
+      logEvent(`→ ${name} entered Hunger Zero state (meditating for ${HUNGER_ZERO_TICKS} ticks)`);
+      return null;
+    });
+
+    if (typeof result === 'string') return { ok: false, message: result };
+    return { ok: true, message: `${name} used ${label}` };
   }
 );

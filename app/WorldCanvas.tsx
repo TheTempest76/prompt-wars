@@ -1,23 +1,35 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Creature, Food } from '../src/module_bindings/types';
+import type { Creature, Food, Powerup } from '../src/module_bindings/types';
 import { onFocusCreature } from './focus';
 
 interface WorldCanvasProps {
   gridSize: number;
   creatures: readonly Creature[];
   food: readonly Food[];
+  powerups: readonly Powerup[];
   terrainCells: string | undefined;
   tickIntervalMs: number;
   // Keyed by Identity.toHexString() -- the owning identity's latest
   // person.name, reduced to initials. See app/WorldView.tsx.
   ownerInitials: ReadonlyMap<string, string>;
+  // The viewer's own identity hex -- used to find "my nearest creature" for
+  // powerup targeting hints and the P-key claim.
+  myOwnerKey?: string;
+  onClaimPowerup?: (powerupId: bigint) => void;
   // When true, a tap on the canvas drops food at that cell (via onPlaceFood)
   // instead of doing nothing; a drag still pans. See app/WorldView.tsx.
   placeMode?: boolean;
   onPlaceFood?: (x: number, y: number) => void;
 }
+
+// Powerup colour per `kind` (see spacetimedb/src/index.ts POWERUP_LABELS):
+// transmute / speed / energy / clone / hunger_zero. Brighter + larger than
+// food so they read as special.
+const POWERUP_COLORS = ['#c98bff', '#38e6ff', '#ffcf3f', '#5bffa3', '#5b9bff'];
+const POWERUP_SHORT = ['Transmute', 'Speed', 'Energy', 'Clone', 'Hunger Zero'];
+const POWERUP_NEAR_CELLS = 5; // within this range of your nearest creature -> label + P-key
 
 // Desaturated, near-black base per biome index (0 bloom, 1 cold, 2 vent,
 // 3 barren — matches spacetimedb/src/index.ts's BIOME_* constants). Kept
@@ -113,7 +125,7 @@ function isTypingTarget(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true;
 }
 
-export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickIntervalMs, ownerInitials, placeMode = false, onPlaceFood }: WorldCanvasProps) {
+export function WorldCanvas({ gridSize, creatures, food, powerups, terrainCells, tickIntervalMs, ownerInitials, myOwnerKey, onClaimPowerup, placeMode = false, onPlaceFood }: WorldCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -148,6 +160,14 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
   gridSizeRef.current = gridSize;
   const foodRef = useRef(food);
   foodRef.current = food;
+  const powerupsRef = useRef(powerups);
+  powerupsRef.current = powerups;
+  const creaturesRef = useRef(creatures);
+  creaturesRef.current = creatures;
+  const myOwnerKeyRef = useRef(myOwnerKey);
+  myOwnerKeyRef.current = myOwnerKey;
+  const onClaimPowerupRef = useRef(onClaimPowerup);
+  onClaimPowerupRef.current = onClaimPowerup;
   const tickIntervalMsRef = useRef(tickIntervalMs);
   tickIntervalMsRef.current = tickIntervalMs;
   const ownerInitialsRef = useRef(ownerInitials);
@@ -185,17 +205,14 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
   const pinchRef = useRef<{ dist: number; midX: number; midY: number } | null>(null);
 
   const clampCamera = useCallback((cam: Camera, size: number): Camera => {
-    const { cssWidth, cssHeight } = viewportRef.current;
     const zoom = Math.max(minZoomRef.current, Math.min(MAX_ZOOM, cam.zoom));
-    const halfW = cssWidth / 2 / zoom;
-    const halfH = cssHeight / 2 / zoom;
-    // The viewport center must stay within the world's bounds (plus a
-    // little breathing room) -- since the center is always on screen, this
-    // guarantees the world can never be panned entirely off screen.
-    const margin = Math.max(halfW, halfH) * 0.5;
+    // The world is a torus -- the camera centre wraps modulo the grid instead
+    // of clamping at an edge, and the renderer tiles the world to match, so
+    // panning never runs out of world. Only zoom is bounded.
+    if (size <= 0) return { x: cam.x, y: cam.y, zoom };
     return {
-      x: Math.max(-margin, Math.min(size + margin, cam.x)),
-      y: Math.max(-margin, Math.min(size + margin, cam.y)),
+      x: ((cam.x % size) + size) % size,
+      y: ((cam.y % size) + size) % size,
       zoom,
     };
   }, []);
@@ -232,26 +249,28 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
   }, [fitCamera, clampCamera]);
 
   // "Focus my new creature": SpawnCreature fires an id the moment the spawn
-  // procedure returns; the row itself may still be a beat behind over the
-  // subscription, so we stash the request and let the effect below retry
-  // against each `creatures` update until it lands (or the window lapses).
-  const pendingFocusRef = useRef<{ id: bigint; until: number } | null>(null);
+  // procedure returns; the row itself is usually a beat behind over the
+  // subscription. `focusReq` is state (not a ref) so setting it actually
+  // re-runs the effect below, which then retries on every `creatures` update
+  // until the row lands or the 8s window lapses.
+  const [focusReq, setFocusReq] = useState<bigint | null>(null);
+  const focusDeadlineRef = useRef(0);
   useEffect(
     () =>
       onFocusCreature(id => {
-        pendingFocusRef.current = { id, until: performance.now() + 8000 };
+        focusDeadlineRef.current = performance.now() + 8000;
+        setFocusReq(id);
       }),
     []
   );
   useEffect(() => {
-    const pending = pendingFocusRef.current;
-    if (!pending) return;
-    if (performance.now() > pending.until) {
-      pendingFocusRef.current = null;
+    if (focusReq === null) return;
+    if (performance.now() > focusDeadlineRef.current) {
+      setFocusReq(null);
       return;
     }
-    const target = creatures.find(c => c.id === pending.id);
-    if (!target) return;
+    const target = creatures.find(c => c.id === focusReq);
+    if (!target) return; // not in the subscription yet -- retry next update
     const size = gridSizeRef.current;
     const { cssWidth, cssHeight } = viewportRef.current;
     if (size <= 0 || cssWidth === 0 || cssHeight === 0) return;
@@ -261,9 +280,9 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
       Math.min(MAX_ZOOM, Math.min(cssWidth, cssHeight) / FOCUS_SPAN_CELLS)
     );
     userAdjustedRef.current = true; // don't let the layout pass re-fit over this
-    setCamera(cam => clampCamera({ x: target.x + 0.5, y: target.y + 0.5, zoom: focusZoom }, size));
-    pendingFocusRef.current = null;
-  }, [creatures, clampCamera]);
+    setCamera(clampCamera({ x: target.x + 0.5, y: target.y + 0.5, zoom: focusZoom }, size));
+    setFocusReq(null);
+  }, [focusReq, creatures, clampCamera]);
 
   // ---- Canvas sizing: ResizeObserver + devicePixelRatio, not window resize ----
   useEffect(() => {
@@ -320,8 +339,15 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
           changedAt: now, size: c.size, color: c.color, glyph: c.glyph, isPredator: c.isPredator, ownerKey,
         });
       } else if (existing.currX !== c.x || existing.currY !== c.y) {
+        // The world is a torus: a creature stepping off one edge reappears on
+        // the opposite one. Lerping across that whole span would look like a
+        // teleport streak, so on a big jump we snap (prev = curr) instead.
+        const half = gridSize / 2;
+        const wrapped = Math.abs(c.x - existing.currX) > half || Math.abs(c.y - existing.currY) > half;
         map.set(key, {
-          prevX: existing.currX, prevY: existing.currY, currX: c.x, currY: c.y,
+          prevX: wrapped ? c.x : existing.currX,
+          prevY: wrapped ? c.y : existing.currY,
+          currX: c.x, currY: c.y,
           changedAt: now, size: c.size, color: c.color, glyph: c.glyph, isPredator: c.isPredator, ownerKey,
         });
       } else {
@@ -338,7 +364,7 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
     for (const key of [...map.keys()]) {
       if (!seen.has(key)) map.delete(key); // died
     }
-  }, [creatures]);
+  }, [creatures, gridSize]);
 
   // ---- Drawing: reads everything from refs, so it never needs recreating ----
   const draw = useCallback((now: number) => {
@@ -359,108 +385,199 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
       y: (wy - cam.y) * cam.zoom + cssHeight / 2,
     });
 
+    // The world is a torus: figure out which integer copies of the grid touch
+    // the viewport, then tile every layer across them so panning never hits an
+    // edge. Usually 1 copy on each axis, up to 2-3 near a seam.
+    const tilesX: number[] = [];
+    const tilesY: number[] = [];
     if (size > 0) {
-      const topLeft = worldToScreen(0, 0);
-      const bottomRight = worldToScreen(size, size);
-      const w = bottomRight.x - topLeft.x;
-      const h = bottomRight.y - topLeft.y;
+      const halfW = cssWidth / 2 / cam.zoom;
+      const halfH = cssHeight / 2 / cam.zoom;
+      const kxMin = Math.floor((cam.x - halfW) / size);
+      const kxMax = Math.min(Math.floor((cam.x + halfW) / size), kxMin + 3);
+      const kyMin = Math.floor((cam.y - halfH) / size);
+      const kyMax = Math.min(Math.floor((cam.y + halfH) / size), kyMin + 3);
+      for (let k = kxMin; k <= kxMax; k++) tilesX.push(k * size);
+      for (let k = kyMin; k <= kyMax; k++) tilesY.push(k * size);
+    } else {
+      tilesX.push(0);
+      tilesY.push(0);
+    }
 
-      // The dish itself: a tiny (gridSize x gridSize) texture drawn hugely
-      // upscaled. Bilinear image smoothing does the soft-field blur for
-      // free -- no blur filter, no per-frame cost beyond one drawImage.
+    const onScreen = (px: number, py: number, pad: number) =>
+      px >= -pad && px <= cssWidth + pad && py >= -pad && py <= cssHeight + pad;
+    const wrappedDist = (a: number, b: number) => {
+      const d = Math.abs(a - b);
+      return size > 0 ? Math.min(d, size - d) : d;
+    };
+
+    // Terrain: one tiny (gridSize x gridSize) texture drawn hugely upscaled,
+    // once per visible world-copy. Bilinear smoothing gives the soft-field
+    // blur for free.
+    if (size > 0) {
       const terrainCanvas = terrainCanvasRef.current;
       if (terrainCanvas) {
         ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(terrainCanvas, topLeft.x, topLeft.y, w, h);
+        for (const ox of tilesX) {
+          for (const oy of tilesY) {
+            const tl = worldToScreen(ox, oy);
+            const br = worldToScreen(ox + size, oy + size);
+            ctx.drawImage(terrainCanvas, tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+          }
+        }
       }
-
-      // Dish rim.
-      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(topLeft.x, topLeft.y, w, h);
     }
 
     // Food: small bright particles with a faint bloom -- the only other
-    // saturated thing on screen besides creatures.
-    for (const f of foodRef.current) {
-      const p = worldToScreen(f.x + 0.5, f.y + 0.5);
-      const r = Math.max(1.5, cam.zoom * 0.1) * (FOOD_SIZE_MULT[f.kind] ?? 1);
-      const color = FOOD_COLORS[f.kind] ?? FOOD_COLOR;
+    // saturated thing on screen besides creatures. Tiled across world copies.
+    for (const ox of tilesX) {
+      for (const oy of tilesY) {
+        for (const f of foodRef.current) {
+          const p = worldToScreen(f.x + 0.5 + ox, f.y + 0.5 + oy);
+          if (!onScreen(p.x, p.y, 20)) continue;
+          const r = Math.max(1.5, cam.zoom * 0.1) * (FOOD_SIZE_MULT[f.kind] ?? 1);
+          const color = FOOD_COLORS[f.kind] ?? FOOD_COLOR;
 
-      const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
-      bloom.addColorStop(0, color);
-      bloom.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = bloom;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, r * 3, 0, Math.PI * 2);
-      ctx.fill();
+          const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
+          bloom.addColorStop(0, color);
+          bloom.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = bloom;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r * 3, 0, Math.PI * 2);
+          ctx.fill();
 
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fill();
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
 
-    // Creatures: glowing organisms. A firm dark outline keeps lineage
-    // colour reading clearly against every biome, not just the ones it
-    // happens to contrast with by luck. Predators break both rules on
-    // purpose -- sharp diamond, fixed red/white, no soft glow -- so a
-    // first-time viewer reads "that one is dangerous" with no legend.
-    for (const entry of interpRef.current.values()) {
-      const t = Math.min(1, (now - entry.changedAt) / tickIntervalMsRef.current);
-      const wx = entry.prevX + (entry.currX - entry.prevX) * t + 0.5;
-      const wy = entry.prevY + (entry.currY - entry.prevY) * t + 0.5;
-      const p = worldToScreen(wx, wy);
-      const radius = Math.max(3, entry.size * cam.zoom * 0.5);
+    // Powerups: bigger, brighter 4-point sparkles, one colour per kind. When
+    // one is within POWERUP_NEAR_CELLS of the viewer's nearest creature it
+    // gets a pulsing ring and a name label ("Speed · press P").
+    const myKey = myOwnerKeyRef.current;
+    const myCreatures = myKey
+      ? creaturesRef.current.filter(c => !c.isPredator && c.owner?.toHexString() === myKey)
+      : [];
+    const spin = (now / 2600) % (Math.PI * 2);
+    for (const ox of tilesX) {
+      for (const oy of tilesY) {
+        for (const pu of powerupsRef.current) {
+          const p = worldToScreen(pu.x + 0.5 + ox, pu.y + 0.5 + oy);
+          if (!onScreen(p.x, p.y, 60)) continue;
+          const color = POWERUP_COLORS[pu.kind] ?? '#ffffff';
+          const rr = Math.max(3, cam.zoom * 0.32);
 
-      if (entry.isPredator) {
-        ctx.save();
-        ctx.translate(p.x, p.y);
-        ctx.beginPath();
-        ctx.moveTo(0, -radius);
-        ctx.lineTo(radius, 0);
-        ctx.lineTo(0, radius);
-        ctx.lineTo(-radius, 0);
-        ctx.closePath();
-        ctx.fillStyle = PREDATOR_FILL;
-        ctx.fill();
-        ctx.strokeStyle = PREDATOR_STROKE;
-        ctx.lineWidth = Math.max(1.5, radius * 0.25);
-        ctx.stroke();
-        ctx.restore();
-        continue;
+          const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rr * 3.2);
+          bloom.addColorStop(0, color);
+          bloom.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = bloom;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, rr * 3.2, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(spin);
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          for (let i = 0; i < 4; i++) {
+            const a = (i / 4) * Math.PI * 2;
+            ctx.lineTo(Math.cos(a) * rr * 1.9, Math.sin(a) * rr * 1.9);
+            const b = a + Math.PI / 4;
+            ctx.lineTo(Math.cos(b) * rr * 0.7, Math.sin(b) * rr * 0.7);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+
+          let nearMine = Infinity;
+          for (const c of myCreatures) {
+            nearMine = Math.min(nearMine, wrappedDist(c.x, pu.x) + wrappedDist(c.y, pu.y));
+          }
+          if (nearMine <= POWERUP_NEAR_CELLS) {
+            const pulse = 1 + 0.18 * Math.sin(now / 220);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.globalAlpha = 0.8;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, rr * 3.2 * pulse, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+
+            const label = `${POWERUP_SHORT[pu.kind] ?? 'Powerup'} · press P`;
+            ctx.font = '600 12px system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            const tw = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(5,7,12,0.75)';
+            ctx.fillRect(p.x - tw / 2 - 5, p.y - rr * 3.2 - 20, tw + 10, 16);
+            ctx.fillStyle = color;
+            ctx.fillText(label, p.x, p.y - rr * 3.2 - 6);
+          }
+        }
       }
+    }
 
-      const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius * 1.8);
-      glow.addColorStop(0, entry.color);
-      glow.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = glow;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, radius * 1.8, 0, Math.PI * 2);
-      ctx.fill();
+    // Creatures: glowing organisms, tiled across visible world copies so one
+    // near a seam shows on both sides. A firm dark outline keeps lineage
+    // colour reading clearly against every biome. Predators break the rules
+    // on purpose -- sharp diamond, fixed red/white, no glow.
+    for (const ox of tilesX) {
+      for (const oy of tilesY) {
+        for (const entry of interpRef.current.values()) {
+          const t = Math.min(1, (now - entry.changedAt) / tickIntervalMsRef.current);
+          const wx = entry.prevX + (entry.currX - entry.prevX) * t + 0.5 + ox;
+          const wy = entry.prevY + (entry.currY - entry.prevY) * t + 0.5 + oy;
+          const p = worldToScreen(wx, wy);
+          const radius = Math.max(3, entry.size * cam.zoom * 0.5);
+          if (!onScreen(p.x, p.y, radius * 2 + 12)) continue;
 
-      // The LLM-assigned emoji, not a flat circle -- sized directly off
-      // `radius` (which is already size*zoom), so a creature growing from
-      // meals is a *visibly bigger emoji* on screen, not just a bigger
-      // number in the table. Font size, not a scale transform, so glyphs
-      // stay crisp at any zoom instead of blurring.
-      ctx.font = `${radius * 2}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(entry.glyph, p.x, p.y);
+          if (entry.isPredator) {
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.beginPath();
+            ctx.moveTo(0, -radius);
+            ctx.lineTo(radius, 0);
+            ctx.lineTo(0, radius);
+            ctx.lineTo(-radius, 0);
+            ctx.closePath();
+            ctx.fillStyle = PREDATOR_FILL;
+            ctx.fill();
+            ctx.strokeStyle = PREDATOR_STROKE;
+            ctx.lineWidth = Math.max(1.5, radius * 0.25);
+            ctx.stroke();
+            ctx.restore();
+            continue;
+          }
 
-      // Profile-name feature: whoever spawned this creature gets their
-      // initials (first 2 letters of their latest `person.name`) pinned
-      // above it -- lets a player spot their own creatures at a glance.
-      // Undefined for seed/predator creatures and for owners who never
-      // added a name, so most of the world stays label-free.
-      const label = entry.ownerKey ? ownerInitialsRef.current.get(entry.ownerKey) : undefined;
-      if (label) {
-        ctx.font = `${Math.max(9, radius * 0.7)}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(label, p.x, p.y - radius - 2);
+          const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius * 1.8);
+          glow.addColorStop(0, entry.color);
+          glow.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = glow;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, radius * 1.8, 0, Math.PI * 2);
+          ctx.fill();
+
+          // The LLM-assigned emoji, sized directly off `radius` so growth
+          // from meals reads as a visibly bigger glyph. Font size, not a
+          // transform, so it stays crisp at any zoom.
+          ctx.font = `${radius * 2}px sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(entry.glyph, p.x, p.y);
+
+          const label = entry.ownerKey ? ownerInitialsRef.current.get(entry.ownerKey) : undefined;
+          if (label) {
+            ctx.font = `${Math.max(9, radius * 0.7)}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(label, p.x, p.y - radius - 2);
+          }
+        }
       }
     }
   }, []);
@@ -502,6 +619,25 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
     return () => cancelAnimationFrame(rafId);
   }, [draw, clampCamera]);
 
+  // P key: claim the powerup closest to any of the viewer's own creatures,
+  // as long as it's within POWERUP_NEAR_CELLS. Reads only refs, so [] deps.
+  const claimPowerupWithKey = useCallback(() => {
+    const claim = onClaimPowerupRef.current;
+    const myKey = myOwnerKeyRef.current;
+    if (!claim || !myKey) return;
+    const mine = creaturesRef.current.filter(
+      c => !c.isPredator && c.owner?.toHexString() === myKey
+    );
+    if (mine.length === 0) return;
+    let best: { id: bigint; d: number } | null = null;
+    for (const pu of powerupsRef.current) {
+      let d = Infinity;
+      for (const c of mine) d = Math.min(d, Math.abs(c.x - pu.x) + Math.abs(c.y - pu.y));
+      if (d <= POWERUP_NEAR_CELLS && (!best || d < best.d)) best = { id: pu.id, d };
+    }
+    if (best) claim(best.id);
+  }, []);
+
   // ---- Keyboard: arrows/WASD pan, +/- zoom, 0 fits -- never while typing ----
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -511,6 +647,11 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
         e.preventDefault();
         userAdjustedRef.current = false; // explicit reset -- keep auto-fitting again after this
         fitCamera(gridSizeRef.current);
+        return;
+      }
+      if (key === 'p') {
+        e.preventDefault();
+        claimPowerupWithKey();
         return;
       }
       if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd', '+', '=', '-', '_'].includes(key)) {
@@ -527,12 +668,29 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [fitCamera]);
+  }, [fitCamera, claimPowerupWithKey]);
 
   // ---- Pointer events: one finger pans, two pinch-zoom around the midpoint ----
   const screenToWorld = useCallback((sx: number, sy: number, cam: Camera) => {
     const { cssWidth, cssHeight } = viewportRef.current;
     return { x: cam.x + (sx - cssWidth / 2) / cam.zoom, y: cam.y + (sy - cssHeight / 2) / cam.zoom };
+  }, []);
+
+  // Powerup under a world point, within `radiusCells` (tap-to-claim). The tap
+  // point can land outside [0,size) because the camera wraps, so distance is
+  // measured on the torus.
+  const powerupNear = useCallback((wx: number, wy: number, radiusCells: number): bigint | null => {
+    const size = gridSizeRef.current;
+    const axis = (a: number, b: number) => {
+      const d = Math.abs(a - b);
+      return size > 0 ? Math.min(d, size - d) : d;
+    };
+    let best: { id: bigint; d: number } | null = null;
+    for (const pu of powerupsRef.current) {
+      const d = Math.hypot(axis(pu.x + 0.5, wx), axis(pu.y + 0.5, wy));
+      if (d <= radiusCells && (!best || d < best.d)) best = { id: pu.id, d };
+    }
+    return best?.id ?? null;
   }, []);
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -599,15 +757,22 @@ export function WorldCanvas({ gridSize, creatures, food, terrainCells, tickInter
     pointersRef.current.delete(e.pointerId);
     if (pointersRef.current.size < 2) pinchRef.current = null;
 
-    // A tap that didn't turn into a drag, while in place mode, drops food on
-    // the cell under the pointer.
     const tap = tapRef.current;
-    if (tap && !tap.moved && pointersRef.current.size === 0 && placeModeRef.current && onPlaceFoodRef.current) {
+    if (tap && !tap.moved && pointersRef.current.size === 0) {
       const w = screenToWorld(tap.sx, tap.sy, cameraRef.current);
       const size = gridSizeRef.current;
-      const cx = Math.floor(w.x);
-      const cy = Math.floor(w.y);
-      if (cx >= 0 && cy >= 0 && cx < size && cy < size) {
+      // A tap on (or very near) a powerup claims it -- takes priority over
+      // dropping food.
+      const hitPowerup = onClaimPowerupRef.current
+        ? powerupNear(w.x, w.y, Math.max(1.5, 14 / cameraRef.current.zoom))
+        : null;
+      if (hitPowerup !== null) {
+        onClaimPowerupRef.current!(hitPowerup);
+      } else if (placeModeRef.current && onPlaceFoodRef.current && size > 0) {
+        // The camera wraps, so a tap can resolve outside [0,size) -- fold it
+        // back onto the torus before dropping food.
+        const cx = ((Math.floor(w.x) % size) + size) % size;
+        const cy = ((Math.floor(w.y) % size) + size) % size;
         onPlaceFoodRef.current(cx, cy);
       }
     }

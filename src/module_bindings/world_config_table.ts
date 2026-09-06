@@ -30,4 +30,7 @@ export default __t.row({
   tickIntervalMicros: __t.u64().name("tick_interval_micros"),
   minPopulation: __t.u32().name("min_population"),
   restockAmount: __t.u32().name("restock_amount"),
+  powerupCap: __t.u32().name("powerup_cap"),
+  powerupSpawnEveryTicks: __t.u32().name("powerup_spawn_every_ticks"),
+  powerupDespawnTicks: __t.u32().name("powerup_despawn_ticks"),
 });

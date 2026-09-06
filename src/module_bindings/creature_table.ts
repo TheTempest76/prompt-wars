@@ -25,4 +25,7 @@ export default __t.row({
   isPredator: __t.bool().name("is_predator"),
   kills: __t.u32(),
   owner: __t.option(__t.identity()),
+  speedUntilTick: __t.u64().name("speed_until_tick"),
+  surgeUntilTick: __t.u64().name("surge_until_tick"),
+  hungerZeroUntilTick: __t.u64().name("hunger_zero_until_tick"),
 });

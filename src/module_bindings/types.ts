@@ -10,6 +10,12 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const ClaimResult = __t.object("ClaimResult", {
+  ok: __t.bool(),
+  message: __t.string(),
+});
+export type ClaimResult = __Infer<typeof ClaimResult>;
+
 export const Creature = __t.object("Creature", {
   id: __t.u64(),
   x: __t.u32(),
@@ -25,6 +31,9 @@ export const Creature = __t.object("Creature", {
   isPredator: __t.bool(),
   kills: __t.u32(),
   owner: __t.option(__t.identity()),
+  speedUntilTick: __t.u64(),
+  surgeUntilTick: __t.u64(),
+  hungerZeroUntilTick: __t.u64(),
 });
 export type Creature = __Infer<typeof Creature>;
 
@@ -65,6 +74,15 @@ export const Person = __t.object("Person", {
 });
 export type Person = __Infer<typeof Person>;
 
+export const Powerup = __t.object("Powerup", {
+  id: __t.u64(),
+  x: __t.u32(),
+  y: __t.u32(),
+  kind: __t.u8(),
+  spawnedAtTick: __t.u64(),
+});
+export type Powerup = __Infer<typeof Powerup>;
+
 export const SpawnResult = __t.object("SpawnResult", {
   creatureId: __t.option(__t.u64()),
   summary: __t.string(),
@@ -103,6 +121,9 @@ export const WorldConfig = __t.object("WorldConfig", {
   tickIntervalMicros: __t.u64(),
   minPopulation: __t.u32(),
   restockAmount: __t.u32(),
+  powerupCap: __t.u32(),
+  powerupSpawnEveryTicks: __t.u32(),
+  powerupDespawnTicks: __t.u32(),
 });
 export type WorldConfig = __Infer<typeof WorldConfig>;
 

@@ -44,10 +44,12 @@ import SetGridSizeReducer from "./set_grid_size_reducer";
 import SetLlmKeyReducer from "./set_llm_key_reducer";
 import SetPopulationCapReducer from "./set_population_cap_reducer";
 import SetPopulationFloorReducer from "./set_population_floor_reducer";
+import SetPowerupConfigReducer from "./set_powerup_config_reducer";
 import SetTickSpeedReducer from "./set_tick_speed_reducer";
 import SpawnPredatorReducer from "./spawn_predator_reducer";
 
 // Import all procedure arg schemas
+import * as ClaimPowerupProcedure from "./claim_powerup_procedure";
 import * as SpawnFromPromptProcedure from "./spawn_from_prompt_procedure";
 
 // Import all table schema definitions
@@ -56,6 +58,7 @@ import EventLogRow from "./event_log_table";
 import FoodRow from "./food_table";
 import FoodGrantRow from "./food_grant_table";
 import PersonRow from "./person_table";
+import PowerupRow from "./powerup_table";
 import TerrainRow from "./terrain_table";
 import WorldConfigRow from "./world_config_table";
 
@@ -114,6 +117,17 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, PersonRow),
+  powerup: __table({
+    name: 'powerup',
+    indexes: [
+      { accessor: 'id', name: 'powerup_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'powerup_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, PowerupRow),
   terrain: __table({
     name: 'terrain',
     indexes: [
@@ -150,12 +164,14 @@ const reducersSchema = __reducers(
   __reducerSchema("set_llm_key", SetLlmKeyReducer),
   __reducerSchema("set_population_cap", SetPopulationCapReducer),
   __reducerSchema("set_population_floor", SetPopulationFloorReducer),
+  __reducerSchema("set_powerup_config", SetPowerupConfigReducer),
   __reducerSchema("set_tick_speed", SetTickSpeedReducer),
   __reducerSchema("spawn_predator", SpawnPredatorReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */
 const proceduresSchema = __procedures(
+  __procedureSchema("claim_powerup", ClaimPowerupProcedure.params, ClaimPowerupProcedure.returnType),
   __procedureSchema("spawn_from_prompt", SpawnFromPromptProcedure.params, SpawnFromPromptProcedure.returnType),
 );
 

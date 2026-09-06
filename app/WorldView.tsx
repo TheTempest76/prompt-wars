@@ -1,10 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { useReducer, useSpacetimeDB, useTable } from 'spacetimedb/react';
-import { reducers, tables } from '../src/module_bindings';
+import { useProcedure, useReducer, useSpacetimeDB, useTable } from 'spacetimedb/react';
+import { procedures, reducers, tables } from '../src/module_bindings';
 import { WorldCanvas } from './WorldCanvas';
 import { isSfxMuted, playFoodPickup, setSfxMuted, unlockSfx } from './sfx';
+import { pushToast } from './toast';
 
 // Mirrors PLAYER_FOOD_PER_WINDOW / PLAYER_FOOD_WINDOW_MICROS in
 // spacetimedb/src/index.ts -- kept in sync by hand, they change rarely.
@@ -25,14 +26,27 @@ export function WorldView() {
   // whenever the scheduled `tick` reducer commits, no polling. Fetched here
   // (not inside WorldCanvas) so there's exactly one subscription per table,
   // not one per component that wants the data.
+  const { identity } = useSpacetimeDB();
+  const myHex = identity?.toHexString();
+
   const [configs] = useTable(tables.world_config);
-  const [creatures] = useTable(tables.creature);
+  // Toast when one of *your* creatures dies (any cause — starve, predator,
+  // eaten by a bigger creature). onDelete only fires on live deletes, never
+  // on the initial subscription load.
+  const [creatures] = useTable(tables.creature, {
+    onDelete: row => {
+      if (myHex && row.owner && row.owner.toHexString() === myHex) {
+        pushToast(`Your ${row.glyph} creature was lost`, 'bad');
+      }
+    },
+  });
   // A food row is deleted the moment a creature eats it — blip on that.
   // playFoodPickup() rate-limits itself, so a same-tick eating spree is one
   // sound, not a burst.
   const [foodRows] = useTable(tables.food, {
     onDelete: row => playFoodPickup(row.kind),
   });
+  const [powerups] = useTable(tables.powerup);
   const [events] = useTable(tables.event_log);
   const [terrainRows] = useTable(tables.terrain);
   // Small guestbook table -- a second subscription alongside PersonList's own
@@ -40,8 +54,16 @@ export function WorldView() {
   const [people] = useTable(tables.person);
   const [grants] = useTable(tables.food_grant);
 
-  const { identity } = useSpacetimeDB();
   const placeFood = useReducer(reducers.placeFood);
+  const claimPowerup = useProcedure(procedures.claimPowerup);
+  const onClaimPowerup = async (powerupId: bigint) => {
+    try {
+      const res = await claimPowerup({ powerupId });
+      pushToast(res.message, res.ok ? 'good' : 'info');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'bad');
+    }
+  };
   const [placeMode, setPlaceMode] = useState(false);
   const [dropMsg, setDropMsg] = useState<string | null>(null);
 
@@ -224,9 +246,12 @@ export function WorldView() {
           gridSize={gridSize}
           creatures={creatures}
           food={foodRows}
+          powerups={powerups}
           terrainCells={terrainCells}
           tickIntervalMs={tickIntervalMs}
           ownerInitials={ownerInitials}
+          myOwnerKey={myHex}
+          onClaimPowerup={onClaimPowerup}
           placeMode={placeMode}
           onPlaceFood={dropFood}
         />
